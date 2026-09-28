@@ -1,0 +1,51 @@
+name: Windows CI
+
+on:
+  push:
+    branches: [main, 'fix/**', 'feature/**', 'release/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: PowerShell 5.1 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Regression tests (no installation or real Defender scans)
+        run: |
+          & .\tests\Run-Tests.ps1 -ScratchRoot (Join-Path $env:RUNNER_TEMP 'SentinelLocal-tests')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Windows package preflight
+        run: |
+          & .\SelfTest-SentinelLocal.ps1 -Root $env:GITHUB_WORKSPACE -PreStart
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify clean diff
+        run: |
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-results-${{ matrix.os }}
+          path: ${{ runner.temp }}/SentinelLocal-tests/test-results.json
+          if-no-files-found: warn
+          retention-days: 14

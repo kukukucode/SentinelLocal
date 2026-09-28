@@ -97,7 +97,10 @@ function Check-Tasks {
         $rootOk = ([string]$action.Arguments) -match ('(?i)-Root\s+"' + [regex]::Escape($Root) + '"')
         $fingerprint = "{0}|{1}|{2}" -f $task.State,$action.Execute,$action.Arguments
 
-        if ([string]$task.State -eq "Disabled" -or -not $rootOk) {
+        $expectedScript=if($taskName -eq 'SentinelLocal Watcher'){'Watcher.ps1'}elseif($taskName -eq 'SentinelLocal Response Worker'){'ResponseWorker.ps1'}else{'IntegrityMonitor.ps1'}
+        $scriptOk=([string]$action.Arguments) -match ('(?i)-File\s+"'+[regex]::Escape((Join-Path $Root $expectedScript))+'"')
+        $executeOk=[IO.Path]::GetFileName([string]$action.Execute) -ieq 'powershell.exe'
+        if ([string]$task.State -eq "Disabled" -or -not $rootOk -or -not $scriptOk -or -not $executeOk) {
             Alert-Once -Key ("TaskState|" + $taskName) -Fingerprint $fingerprint -Type "SentinelSelfDefense" -Severity "CRITICAL" -Fields @{
                 Component="ScheduledTask";TaskName=$taskName;State=[string]$task.State;Arguments=[string]$action.Arguments
                 Reason="SentinelLocal task was disabled or its Root argument no longer matches."
@@ -134,7 +137,7 @@ function Check-Heartbeats {
             $processIdValue = if ($heartbeat.WatcherProcessId) { [int]$heartbeat.WatcherProcessId } elseif ($heartbeat.ResponseWorkerProcessId) { [int]$heartbeat.ResponseWorkerProcessId } else { 0 }
             $processAlive = if ($processIdValue -gt 0) { [bool](Get-Process -Id $processIdValue -ErrorAction SilentlyContinue) } else { $false }
             $healthy = $age -le [int]$check.Stale
-            if ($check.Busy -and [string]$heartbeat.Status -eq "Busy" -and $processAlive) { $healthy = $true }
+            $healthy=(Test-SentinelHeartbeat -Heartbeat $heartbeat -StaleSeconds ([int]$check.Stale) -BusyTimeoutSeconds ([int]$config.ResponseTimeoutSeconds)).Healthy
 
             if (-not $healthy) {
                 $fingerprint = "{0}|{1}|{2}" -f [string]$heartbeat.Status,[math]::Floor($age / 30),$processAlive
@@ -206,6 +209,18 @@ try {
         Check-Tasks
         Check-Heartbeats
         Check-FileIntegrity
+        foreach ($logCheck in @(Get-SentinelLogHealth $Root)) {
+            if (-not $logCheck.Healthy) {
+                Alert-Once -Key ('Log|'+$logCheck.Log) -Fingerprint $logCheck.Detail -Type 'LogIntegrityFailure' -Severity 'CRITICAL' -Fields @{Log=$logCheck.Log;Reason=$logCheck.Detail}
+            } else { Clear-AlertKey ('Log|'+$logCheck.Log) }
+        }
+        foreach ($lane in @('high','normal')) {
+            $queued=@(Get-ChildItem -LiteralPath (Join-Path $state ('response-queue\'+$lane)) -File -Filter '*.json' -ErrorAction SilentlyContinue)
+            $oldest=if($queued.Count){((Get-Date)-($queued | Sort-Object CreationTime | Select-Object -First 1).CreationTime).TotalSeconds}else{0}
+            if ($oldest -gt [int]$config.QueueWarningSeconds -or $queued.Count -gt [int]$config.QueueWarningCount) {
+                Alert-Once -Key ('Queue|'+$lane) -Fingerprint ([string][math]::Floor($oldest/60)) -Type 'ResponseQueueDelayed' -Severity 'HIGH' -Fields @{Queue=$lane;Count=$queued.Count;OldestSeconds=[math]::Round($oldest,1)}
+            } else { Clear-AlertKey ('Queue|'+$lane) }
+        }
 
         Start-Sleep -Seconds ([int]$config.SelfDefense.PollSeconds)
     }

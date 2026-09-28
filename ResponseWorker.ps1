@@ -80,17 +80,19 @@ function Save-HashDedupe {
 }
 
 function Write-WorkerHeartbeat {
-    param([string]$Status,[string]$CurrentRequest = "")
+    param([string]$Status,[string]$CurrentRequest = "",[int]$ChildProcessId=0,[string]$RequestStartedAt="")
     $workerProcessId = [System.Diagnostics.Process]::GetCurrentProcess().Id
     $heartbeat = [ordered]@{
         Version=[string]$config.Version
         Status=$Status
         ResponseWorkerProcessId=$workerProcessId
         CurrentRequest=$CurrentRequest
+        ChildProcessId=$ChildProcessId
+        RequestStartedAt=$RequestStartedAt
         LastUpdated=(Get-Date).ToString("o")
     }
     try {
-        $heartbeat | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $heartbeatPath -Encoding UTF8 -ErrorAction Stop
+        Write-SentinelAtomicJson $heartbeatPath $heartbeat
     } catch {
         Write-SentinelError -Root $Root -Component "ResponseWorker" -Operation "Write heartbeat" -Exception $_.Exception
     }
@@ -114,7 +116,9 @@ function Set-RequestAttempts {
     $request = Get-Content $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     if ($request.PSObject.Properties["Attempts"]) { $request.Attempts = $Attempts }
     else { $request | Add-Member -NotePropertyName Attempts -NotePropertyValue $Attempts }
-    $request | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath $Path -Encoding UTF8 -ErrorAction Stop
+    $availableAfter=[datetimeoffset]::Now.AddSeconds([Math]::Min(300,[int]$config.ResponseRetryDelaySeconds * [Math]::Pow(2,[Math]::Max(0,$Attempts-1)))).ToString('o')
+    $request | Add-Member -NotePropertyName AvailableAfter -NotePropertyValue $availableAfter -Force
+    Write-SentinelAtomicJson $Path $request
     return $request
 }
 
@@ -131,12 +135,14 @@ function Move-ToFailed {
 }
 
 function Get-NextRequestFile {
-    $high = Get-ChildItem $highDir -Filter "*.json" -File -ErrorAction SilentlyContinue |
-            Sort-Object CreationTime,Name | Select-Object -First 1
-    if ($high) { return $high }
-
-    return Get-ChildItem $normalDir -Filter "*.json" -File -ErrorAction SilentlyContinue |
-           Sort-Object CreationTime,Name | Select-Object -First 1
+    foreach ($directory in @($highDir,$normalDir)) {
+        foreach ($file in @(Get-ChildItem $directory -Filter '*.json' -File -ErrorAction SilentlyContinue | Sort-Object CreationTime,Name)) {
+            try {
+                $queued=Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+                if (-not $queued.AvailableAfter -or [datetimeoffset]::Parse([string]$queued.AvailableAfter) -le [datetimeoffset]::Now) { return $file }
+            } catch { return $file } # malformed requests reach the failed queue
+        }
+    }
 }
 
 # Recover interrupted work.
@@ -220,8 +226,12 @@ try {
                 }
 
                 if (-not $skipByHash) {
-                    & (Join-Path $Root "Response.ps1") -RequestFile $processingPath -Root $Root | Out-Null
-                    if ($requestHash) {
+                    $timeout=if ((Get-RequestPriority $request) -eq 'High') { [int]$config.ResponseTimeoutSeconds } else { [int]$config.NormalResponseTimeoutSeconds }
+                    $responseResult=Invoke-SentinelBoundedResponse -Root $Root -RequestFile $processingPath -TimeoutSeconds $timeout -HeartbeatSeconds ([int]$config.ResponseWorkerHeartbeatSeconds) -Heartbeat {
+                        param($childId,$started)
+                        Write-WorkerHeartbeat -Status 'Busy' -CurrentRequest $processingPath -ChildProcessId $childId -RequestStartedAt $started
+                    }
+                    if ($requestHash -and $responseResult.Status -eq 'Completed') {
                         $hashDedupe[$requestHash] = [datetimeoffset]::Now
                         Save-HashDedupe
                     }
@@ -233,6 +243,7 @@ try {
                     Priority=(Get-RequestPriority $request)
                     RequestFile=$requestFile.Name
                     HashDeduplicated=$skipByHash
+                    Outcome=if($skipByHash){'Deduplicated'}else{$responseResult.Status}
                 }))
             } catch {
                 Write-SentinelError -Root $Root -Component "ResponseWorker" -Operation "Execute response request" -Exception $_.Exception -Context @{Path=$processingPath}

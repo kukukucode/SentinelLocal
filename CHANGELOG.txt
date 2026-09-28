@@ -1,4 +1,20 @@
-﻿SentinelLocal v1.0.0
+﻿SentinelLocal v1.1.0
+
+RELIABILITY
+- Failed scans/results/evidence now propagate to retry handling; missing targets have a distinct outcome.
+- Bounded response subprocesses with fresh progress heartbeats, retry backoff, and queue-delay alerts.
+- Shared log locks and durable append/retention checkpoints detect truncation, deletion, and interrupted writes.
+- Oldest-first event batching drains more than 300 events without skipping; cleared/reused cursors are reported.
+- Local script arguments are scanned separately; exact baselined internal invocations avoid scan feedback loops.
+
+OPERATIONS
+- Windows status window and opt-in desktop notifications.
+- Expiring SHA-256 exceptions with optional signer binding.
+- Audit snapshots to explicit local/UNC destinations and a bounded remote WinRM observer.
+- Defender running mode/tamper-protection diagnostics and opt-in Sysmon ingestion.
+- Complete installer/upgrade package manifest and Windows 2022/2025 regression CI.
+
+SentinelLocal v1.0.0
 
 INITIAL RELEASE
 - Windows向け初回公開版 v1.0.0

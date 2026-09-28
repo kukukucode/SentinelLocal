@@ -51,6 +51,8 @@ function Get-HealthSnapshot {
             BehaviorMonitorEnabled = [bool]$status.BehaviorMonitorEnabled
             IoavProtectionEnabled = [bool]$status.IoavProtectionEnabled
             OnAccessProtectionEnabled = [bool]$status.OnAccessProtectionEnabled
+            AMRunningMode = [string]$status.AMRunningMode
+            IsTamperProtected = [bool]$status.IsTamperProtected
             AntivirusSignatureAge = [int]$status.AntivirusSignatureAge
             AntivirusSignatureLastUpdated = $status.AntivirusSignatureLastUpdated
             MAPSReporting = [string]$pref.MAPSReporting
@@ -76,6 +78,9 @@ function Get-HealthSnapshot {
 }
 
 $now = Get-HealthSnapshot
+if ($now.AMRunningMode -ne 'Normal' -or -not $now.AntivirusEnabled -or -not $now.RealTimeProtectionEnabled) {
+    Add-HealthAlert 'HIGH' 'DefenderOperationalState' 'Normal / protection enabled' $now.AMRunningMode 'Defender active protection is unavailable or degraded; passive mode has different capabilities.'
+}
 $old = $null
 if (Test-Path $statePath) {
     try {
