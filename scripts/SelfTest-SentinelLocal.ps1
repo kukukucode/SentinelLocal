@@ -3,7 +3,9 @@
     [switch]$PreStart
 )
 
-. (Join-Path $PSScriptRoot 'Common.ps1')
+$commonPath=Join-Path $PSScriptRoot 'Common.ps1'
+if(-not (Test-Path -LiteralPath $commonPath -PathType Leaf)) { $commonPath=Join-Path (Split-Path -Parent $PSScriptRoot) 'src\Common.ps1' }
+. $commonPath
 $results = New-Object System.Collections.Generic.List[object]
 
 function Add-Test([string]$Name,[bool]$Passed,[string]$Detail) {
@@ -11,13 +13,14 @@ function Add-Test([string]$Name,[bool]$Passed,[string]$Detail) {
 }
 
 try {
-    $config = Get-Content (Join-Path $Root "Config.json") -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $config = Get-Content (Get-SentinelSourcePath $Root 'Config.json') -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     Add-Test "Config parse" $true ("Version " + $config.Version)
 } catch {
     Add-Test "Config parse" $false $_.Exception.Message
 }
 
 if ($config) {
+    try { Assert-SentinelConfig $config; Add-Test "Complete configuration policy" $true "validated" } catch { Add-Test "Complete configuration policy" $false $_.Exception.Message }
     Add-Test 'Config: response timeouts' ([int]$config.NormalResponseTimeoutSeconds -ge 1 -and [int]$config.ResponseTimeoutSeconds -ge [int]$config.NormalResponseTimeoutSeconds) 'Normal <= High; both positive'
     Add-Test 'Config: fresh progress interval' ([int]$config.ResponseWorkerHeartbeatSeconds -ge 1 -and [int]$config.ResponseWorkerHeartbeatSeconds -lt [int]$config.ResponseWorkerHeartbeatStaleSeconds) 'Heartbeat interval < stale threshold'
     Add-Test 'Config: event batching' ([int]$config.EventBatchSize -ge 1 -and [int]$config.EventBatchSize -le 10000) 'Batch size within 1..10000'
@@ -35,7 +38,7 @@ if ($config) {
 
 $requiredFiles = @(Get-SentinelPackageFiles)
 foreach ($requiredFile in $requiredFiles) {
-    $requiredPath = Join-Path $Root $requiredFile
+    $requiredPath = Get-SentinelSourcePath $Root $requiredFile
     $exists = Test-Path $requiredPath
     Add-Test ("Installed file: " + $requiredFile) $exists $requiredPath
     if ($exists -and $requiredFile -like '*.ps1') {

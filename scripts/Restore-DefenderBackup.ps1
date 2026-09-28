@@ -5,7 +5,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-. (Join-Path $PSScriptRoot "Common.ps1")
+$commonPath=Join-Path $PSScriptRoot 'Common.ps1'
+if(-not (Test-Path -LiteralPath $commonPath -PathType Leaf)) { $commonPath=Join-Path (Split-Path -Parent $PSScriptRoot) 'src\Common.ps1' }
+. $commonPath
 
 if (-not $BackupPath) {
     $BackupPath = Get-ChildItem (Join-Path $Root "backups\defender-*.json") -File -ErrorAction SilentlyContinue |

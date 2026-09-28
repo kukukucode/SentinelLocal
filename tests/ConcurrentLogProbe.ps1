@@ -1,6 +1,6 @@
 ﻿param([string]$PackageRoot,[string]$ScratchRoot,[ValidateSet('Writer','Retention')][string]$Role,[int]$WriterId)
 $ErrorActionPreference='Stop'
-. (Join-Path $PackageRoot 'Common.ps1')
+. (Join-Path $PackageRoot 'src\Common.ps1')
 try {
     for ($iteration=0;$iteration -lt 12;$iteration++) {
         for ($number=0;$number -lt 4;$number++) {

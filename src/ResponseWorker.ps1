@@ -13,6 +13,7 @@ try {
     throw
 }
 
+Assert-SentinelConfig $config
 $stateDir = Join-Path $Root "state"
 $queueRoot = Join-Path $stateDir "response-queue"
 $highDir = Join-Path $queueRoot "high"
@@ -73,7 +74,7 @@ function Save-HashDedupe {
         $rows = @($hashDedupe.Keys | ForEach-Object {
             [pscustomobject]@{SHA256=$_;LastCompleted=$hashDedupe[$_].ToString("o")}
         })
-        ConvertTo-Json -InputObject @($rows) -Depth 5 | Set-Content -LiteralPath $hashDedupePath -Encoding UTF8 -ErrorAction Stop
+        Write-SentinelAtomicJson $hashDedupePath @($rows)
     } catch {
         Write-SentinelError -Root $Root -Component "ResponseWorker" -Operation "Save hash dedupe state" -Exception $_.Exception -Severity "MEDIUM"
     }
@@ -134,16 +135,8 @@ function Move-ToFailed {
     }))
 }
 
-function Get-NextRequestFile {
-    foreach ($directory in @($highDir,$normalDir)) {
-        foreach ($file in @(Get-ChildItem $directory -Filter '*.json' -File -ErrorAction SilentlyContinue | Sort-Object CreationTime,Name)) {
-            try {
-                $queued=Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
-                if (-not $queued.AvailableAfter -or [datetimeoffset]::Parse([string]$queued.AvailableAfter) -le [datetimeoffset]::Now) { return $file }
-            } catch { return $file } # malformed requests reach the failed queue
-        }
-    }
-}
+$highBurst=0
+function Get-NextRequestFile { Get-SentinelEligibleQueueFile -QueueRoot $queueRoot -Config $config -HighBurst $highBurst }
 
 # Recover interrupted work.
 foreach ($processingFile in @(Get-ChildItem $processingDir -Filter "*.json" -File -ErrorAction SilentlyContinue)) {
@@ -190,6 +183,7 @@ try {
                 continue
             }
 
+            if ($requestFile.Directory.Name -eq 'high') { $highBurst++ } else { $highBurst=0 }
             Write-WorkerHeartbeat -Status "Busy" -CurrentRequest $processingPath
 
             try {
@@ -231,7 +225,7 @@ try {
                         param($childId,$started)
                         Write-WorkerHeartbeat -Status 'Busy' -CurrentRequest $processingPath -ChildProcessId $childId -RequestStartedAt $started
                     }
-                    if ($requestHash -and $responseResult.Status -eq 'Completed') {
+                    if (Test-SentinelCompletedHash -Path ([string]$request.FilePath) -RequestHash $requestHash -Response $responseResult) {
                         $hashDedupe[$requestHash] = [datetimeoffset]::Now
                         Save-HashDedupe
                     }

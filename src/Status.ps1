@@ -29,5 +29,6 @@
         }
     }
     $logHealth=@(Get-SentinelLogHealth $Root)
-    return [pscustomobject]@{Version=$config.Version;ComputerName=$env:COMPUTERNAME;CapturedAt=(Get-Date).ToString('o');Healthy=(@($components | Where-Object { -not $_.Healthy }).Count -eq 0 -and @($queues | Where-Object Delayed).Count -eq 0 -and @($logHealth | Where-Object { -not $_.Healthy }).Count -eq 0 -and $defender.AntivirusEnabled -and $defender.RealTimeProtection -and $defender.Mode -eq 'Normal');Components=$components;Queues=$queues;Logs=$logHealth;Defender=$defender;Alerts=@($alerts | Sort-Object Timestamp -Descending | Select-Object -First 30)}
+    try { $storage=Get-SentinelStorageStatus $Root $config } catch { $storage=[pscustomobject]@{Healthy=$false;Error=$_.Exception.Message} }
+    return [pscustomobject]@{Version=$config.Version;ComputerName=$env:COMPUTERNAME;CapturedAt=(Get-Date).ToString('o');Healthy=($storage.Healthy -and @($queues | Where-Object { $_.Queue -eq "failed" -and $_.Count -gt 0 }).Count -eq 0 -and @($components | Where-Object { -not $_.Healthy }).Count -eq 0 -and @($queues | Where-Object Delayed).Count -eq 0 -and @($logHealth | Where-Object { -not $_.Healthy }).Count -eq 0 -and $defender.AntivirusEnabled -and $defender.RealTimeProtection -and $defender.Mode -eq 'Normal');Storage=$storage;Components=$components;Queues=$queues;Logs=$logHealth;Defender=$defender;Alerts=@($alerts | Sort-Object Timestamp -Descending | Select-Object -First 30)}
 }

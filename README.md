@@ -1,4 +1,4 @@
-# SentinelLocal v1.1.0
+# SentinelLocal v1.2.0
 
 [![Windows CI](https://github.com/kukukucode/SentinelLocal/actions/workflows/windows-ci.yml/badge.svg)](https://github.com/kukukucode/SentinelLocal/actions/workflows/windows-ci.yml)
 
@@ -7,24 +7,41 @@ Microsoft Defender、Windowsのタスクスケジューラ、イベントログ�
 
 Microsoft Defenderを主防御エンジンとして利用する、軽量Host IDS / Defender補助コントローラーです。疑わしい対象をDefender Custom Scanへ渡し、Defenderの判定を優先します。独自アンチウイルス、Protected Process、カーネルEDRではありません。
 
+## リポジトリ構成
+
+| フォルダー | 内容 |
+| --- | --- |
+| src/ | 監視・応答処理と共通コード |
+| scripts/ | 導入・更新・診断・設定・状態画面の操作用スクリプト |
+| config/ | 初期設定のConfig.json |
+| docs/ | 日本語説明書と運用・開発ガイド |
+| tests/ | 回帰試験とテスト補助コード |
+| .github/ | Windows CI |
+
+ソースから使う場合はscripts/のスクリプトを実行します。New-SentinelPackage.ps1で作る配布パッケージとインストール先は従来の配置を使用します。[構成・開発ガイド](docs/REPOSITORY_JP.md)を参照してください。
+
 ## 動作環境
 
 - Windows
 - Windows PowerShell 5.1（`powershell.exe`）
 - Microsoft Defenderと関連するPowerShellコマンドレットが利用できる環境
-- インストール、更新、Defender設定変更などを行うための管理者権限
+- インストール、更新、Defender設定変更、保護されたログの閲覧を行うための管理者権限
 
 ## バージョン
 
 このリポジトリの初回公開版は **v1.0.0** です。提供された`SentinelLocal-v2.5.zip`を基に、設定・スクリプト・ドキュメントのバージョン表記をv1.0.0に統一しています。
 
-現在のv1.1.0では、スキャン失敗の再試行、ログ削除検知、イベントの取りこぼし対策、応答処理のタイムアウトを追加しました。Windows用の状態画面と通知、期限付き例外、監査ログの外部出力、別PCからの死活確認、任意のSysmon連携にも対応しています。設定・運用方法は[運用ガイド](docs/OPERATIONS_JP.md)を参照してください。
+v1.1.0では、スキャン失敗の再試行、ログ削除検知、イベントの取りこぼし対策、応答処理のタイムアウトを追加しました。Windows用の状態画面と通知、期限付き例外、監査ログの外部出力、別PCからの死活確認、任意のSysmon連携にも対応しています。設定・運用方法は[運用ガイド](docs/OPERATIONS_JP.md)を参照してください。
+
+現在の **v1.2.0はWindows PC 1台向けの試験運用版** です。内容のハッシュによる再スキャン判定、再起動をまたぐ永続化比較、容量管理、更新の復元・起動確認、読み取り専用の診断、HTML/JSON調査レポート、設定の検証・復元、署名付きパッケージの検証に対応します。[個人PC試験運用ガイド](docs/PILOT_JP.md)を参照してください。
+
+企業製品と同等の防御性能は未実証です。Windows 11での診断・CIと、実際の管理者導入・Defenderスキャン・長期運用の検証は別です。
 
 ## 主な機能
 
 - プロセス、永続化、TCP接続、Defenderイベントの監視
 - High / Normalの優先Response Queue
-- Watcher側のパス単位の重複抑制と、Worker側のSHA-256単位の重複抑制
+- Watcher側のパス・内容・プロセス識別子による重複抑制と、Worker側のSHA-256単位の重複抑制
 - JSONLログのSHA-256ハッシュチェーン
 - HIGH / CRITICALイベントのWindows Application Event Logへの二重記録
 - 自身のタスク、Heartbeat、重要ファイルのハッシュの監視
@@ -41,9 +58,18 @@ Microsoft Defenderを主防御エンジンとして利用する、軽量Host IDS
 
 ダウンロードしたファイルを展開し、管理者として起動したWindows PowerShellで、そのフォルダーから実行してください。
 
+GitHubのソースリポジトリから導入する場合:
+
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\Install-SentinelLocal.ps1
+.\scripts\Install-SentinelLocal.ps1 -AllowUnsignedPackage
+```
+
+作成済みの配布パッケージから導入する場合:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\Install-SentinelLocal.ps1 -AllowUnsignedPackage
 ```
 
 既定のインストール先は`C:\ProgramData\SentinelLocal`です。以下のタスクがSYSTEM権限で登録されます。
@@ -52,10 +78,10 @@ Set-ExecutionPolicy -Scope Process Bypass
 - SentinelLocal Response Worker
 - SentinelLocal Integrity Monitor
 
-DefenderのAuditFirstプロファイルも適用する場合は、次のように実行します。
+DefenderのAuditFirstプロファイルを適用する前に、変更計画を確認します。
 
 ```powershell
-.\Install-SentinelLocal.ps1 -ApplyDefenderAuditProfile
+& 'C:\ProgramData\SentinelLocal\DefenderHardening.ps1' -Profile AuditFirst -WhatIf
 ```
 
 Defender設定はAuditFirstから開始し、業務への影響を確認してからBlockへ進める設計です。
@@ -64,9 +90,19 @@ Defender設定はAuditFirstから開始し、業務への影響を確認して�
 
 既存の設定値を保持して更新する場合は、管理者Windows PowerShellで実行してください。元パッケージの旧v2.4向けキュー移行処理も含まれています。
 
+ソースリポジトリから更新する場合:
+
 ```powershell
-.\Upgrade-SentinelLocal.ps1
+.\scripts\Upgrade-SentinelLocal.ps1 -AllowUnsignedPackage
 ```
+
+配布パッケージから更新する場合:
+
+```powershell
+.\Upgrade-SentinelLocal.ps1 -AllowUnsignedPackage
+```
+
+署名なし試験版を使う例です。署名付きパッケージではTrustedSignerThumbprintを指定し、信頼済みの検証スクリプトで事前に確認してください。インストール後のHeartbeat確認に失敗した更新は復元されます。
 
 ## 診断とログ検証
 
@@ -82,7 +118,7 @@ Defender設定はAuditFirstから開始し、業務への影響を確認して�
 
 `Config.json`で監視間隔、応答方針、Defender設定、自己監視などを設定します。
 
-Response Queueはスコア80以上をHigh、40以上80未満をNormalとして扱い、Highを優先します。既定の重複抑制期間はパス単位で300秒、SHA-256単位で600秒です。実行中プロセスに紐づく要求とHigh Risk要求は、SHA-256の重複でも処理します。
+Response Queueはスコア80以上をHigh、40以上80未満をNormalとして扱い、Highを優先します。既定の重複抑制期間はパス・内容単位で300秒、SHA-256単位で600秒です。実行中プロセスに紐づく要求とHigh Risk要求は、SHA-256の重複でも処理します。
 
 Integrity Monitorはタスクの削除・無効化・Root引数の改変、Heartbeat、重要PS1と`Config.json`のSHA-256を監視します。基準ファイルは`state\integrity-baseline.json`です。
 
@@ -117,13 +153,13 @@ Integrity Monitorはタスクの削除・無効化・Root引数の改変、Heart
 管理者Windows PowerShellから実行してください。
 
 ```powershell
-.\Uninstall-SentinelLocal.ps1
+& 'C:\ProgramData\SentinelLocal\Uninstall-SentinelLocal.ps1'
 
 # データも削除する場合
-.\Uninstall-SentinelLocal.ps1 -RemoveData
+& 'C:\ProgramData\SentinelLocal\Uninstall-SentinelLocal.ps1' -RemoveData
 ```
 
-詳細は[日本語説明書](README_JP.txt)と[変更履歴](CHANGELOG.txt)を参照してください。
+詳細は[日本語説明書](docs/README_JP.txt)と[変更履歴](CHANGELOG.txt)を参照してください。
 
 ## CIと回帰テスト
 
@@ -131,6 +167,7 @@ GitHub ActionsでWindows Server 2022 / 2025のWindows PowerShell 5.1を使用し
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-PilotTests.ps1
 ```
 
 テストは一時フォルダーとモックを使用します。Defenderの実スキャン、インストール、OS設定変更は行いません。Windowsの実機・VMでのインストール後の検証は別途必要です。

@@ -33,9 +33,13 @@ jobs:
         run: |
           & .\tests\Run-Tests.ps1 -ScratchRoot (Join-Path $env:RUNNER_TEMP 'SentinelLocal-tests')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Pilot reliability and package trust regression
+        run: |
+          & .\tests\Run-PilotTests.ps1 -ScratchRoot (Join-Path $env:RUNNER_TEMP 'SentinelLocal-pilot-tests')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Windows package preflight
         run: |
-          & .\SelfTest-SentinelLocal.ps1 -Root $env:GITHUB_WORKSPACE -PreStart
+          & .\scripts\SelfTest-SentinelLocal.ps1 -Root $env:GITHUB_WORKSPACE -PreStart
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Verify clean diff
         run: |
@@ -46,6 +50,8 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: test-results-${{ matrix.os }}
-          path: ${{ runner.temp }}/SentinelLocal-tests/test-results.json
+          path: |
+            ${{ runner.temp }}/SentinelLocal-tests/test-results.json
+            ${{ runner.temp }}/SentinelLocal-pilot-tests/test-results.json
           if-no-files-found: warn
           retention-days: 14

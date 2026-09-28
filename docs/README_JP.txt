@@ -1,6 +1,11 @@
-﻿v1.1の追加機能・設定手順は docs\OPERATIONS_JP.md を参照してください。
+﻿Source repository: operational scripts are under scripts/; defaults are in config/Config.json. See docs/REPOSITORY_JP.md.
+v1.2 single-PC pilot: docs/PILOT_JP.md
+Install/upgrade unsigned pilot: -AllowUnsignedPackage is now required.
+Use DefenderHardening.ps1 separately; the former installer audit-profile switch was removed.
 
-SentinelLocal v1.1.0（Windows専用）
+v1.1の追加機能・設定手順は docs\OPERATIONS_JP.md を参照してください。
+
+SentinelLocal v1.2.0（Windows専用）
 ==================
 
 位置づけ
@@ -100,7 +105,7 @@ Integrity Monitorは次を監視します。
 
 Defender AuditFirstも同時に設定:
 
-  .\Install-SentinelLocal.ps1 -ApplyDefenderAuditProfile
+  & 'C:\ProgramData\SentinelLocal\DefenderHardening.ps1' -Profile AuditFirst -WhatIf
 
 既存インストールから更新（旧パッケージv2.4を含む）:
 

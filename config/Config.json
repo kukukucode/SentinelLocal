@@ -1,5 +1,5 @@
 ﻿{
-  "Version": "1.1.0",
+  "Version": "1.2.0",
   "PollSeconds": 2,
   "PersistencePollSeconds": 15,
   "DefenderHealthPollSeconds": 60,
@@ -61,5 +61,17 @@
     "Enabled": false,
     "DestinationPath": "",
     "IntervalSeconds": 300
+  },
+  "Resources": {
+    "MaxQueueCount": 5000,
+    "HighQueueReserve": 100,
+    "MinFreeDiskMB": 512,
+    "MaxEvidenceMB": 2048,
+    "MaxLogFileMB": 64,
+    "StorageCheckSeconds": 5
+  },
+  "Scheduling": {
+    "NormalAgingSeconds": 120,
+    "HighBurstLimit": 5
   }
 }

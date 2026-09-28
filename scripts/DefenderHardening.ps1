@@ -1,4 +1,5 @@
 ﻿#Requires -RunAsAdministrator
+[CmdletBinding(SupportsShouldProcess=$true)]
 param(
     [ValidateSet("Status","AuditFirst","RecommendedBlock")]
     [string]$Profile = "Status",
@@ -6,18 +7,23 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-. (Join-Path $PSScriptRoot "Common.ps1")
+$commonPath=Join-Path $PSScriptRoot 'Common.ps1'
+if(-not (Test-Path -LiteralPath $commonPath -PathType Leaf)) { $commonPath=Join-Path (Split-Path -Parent $PSScriptRoot) 'src\Common.ps1' }
+. $commonPath
 
 $backups = Join-Path $Root "backups"
 $logs = Join-Path $Root "logs"
-New-Item $backups,$logs -ItemType Directory -Force | Out-Null
 $AsrNames = Get-SentinelManagedAsrRules
 
 function Get-CoreSnapshot {
     try {
         $status = Get-MpComputerStatus -ErrorAction Stop
         $pref = Get-MpPreference -ErrorAction Stop
+        $os=Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
         [ordered]@{
+            OperatingSystem=[string]$os.Caption
+            # Only documented Pro/Enterprise client editions are applied automatically.
+            NetworkProtectionSupported=([int]$os.ProductType -eq 1 -and [int]$os.OperatingSystemSKU -in @(4,27,48,49,125,126) -and [int]$os.BuildNumber -ge 16299)
             SavedAt = (Get-Date).ToString("o")
             ComputerStatus = [ordered]@{
                 AntivirusEnabled = $status.AntivirusEnabled
@@ -87,62 +93,32 @@ if ($Profile -eq "Status") {
     exit 0
 }
 
-$backup = Get-CoreSnapshot
-$backupPath = Join-Path $backups ("defender-{0}.json" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
-$backup | ConvertTo-Json -Depth 14 | Set-Content -LiteralPath $backupPath -Encoding UTF8
-Write-Host "Backup: $backupPath"
-
-$changes = @(
-    @{Name="Cloud protection"; Script={ Set-MpPreference -MAPSReporting Advanced -ErrorAction Stop }},
-    @{Name="Safe sample submission"; Script={ Set-MpPreference -SubmitSamplesConsent SendSafeSamples -ErrorAction Stop }},
-    @{Name="Block at First Sight"; Script={ Set-MpPreference -DisableBlockAtFirstSeen $false -ErrorAction Stop }},
-    @{Name="PUA protection"; Script={ Set-MpPreference -PUAProtection Enabled -ErrorAction Stop }},
-    @{Name="Network Protection"; Script={ Set-MpPreference -EnableNetworkProtection Enabled -ErrorAction Stop }},
-    @{Name="Signature check before scan"; Script={ Set-MpPreference -CheckForSignaturesBeforeRunningScan $true -ErrorAction Stop }},
-    @{Name="Cloud block level"; Script={ Set-MpPreference -CloudBlockLevel High -ErrorAction Stop }},
-    @{Name="Behavior monitoring"; Script={ Set-MpPreference -DisableBehaviorMonitoring $false -ErrorAction Stop }},
-    @{Name="IOAV protection"; Script={ Set-MpPreference -DisableIOAVProtection $false -ErrorAction Stop }},
-    @{Name="Real-time protection"; Script={ Set-MpPreference -DisableRealtimeMonitoring $false -ErrorAction Stop }}
-)
-
-foreach ($change in $changes) {
-    try {
-        & $change.Script
-        Write-Host ("[OK] {0}" -f $change.Name) -ForegroundColor Green
-    } catch {
-        Write-Host ("[POLICY/ERROR] {0}: {1}" -f $change.Name,$_.Exception.Message) -ForegroundColor Yellow
-        Write-SentinelError -Root $Root -Component "DefenderHardening" -Operation $change.Name -Exception $_.Exception -Severity "MEDIUM"
-    }
+$snapshot=Get-CoreSnapshot
+$plan=@(Get-SentinelHardeningPlan $snapshot $Profile)
+$plan | Format-Table -AutoSize
+if(-not $PSCmdlet.ShouldProcess('Microsoft Defender preferences','Back up, apply planned profile, verify each setting and record outcome')) { return }
+New-Item $backups,$logs -ItemType Directory -Force | Out-Null
+$backupPath=Join-Path $backups ('defender-'+(Get-Date -Format 'yyyyMMddHHmmssfff')+'-'+[guid]::NewGuid().ToString('N')+'.json')
+Write-SentinelAtomicJson $backupPath $snapshot
+$failures=[Collections.Generic.List[string]]::new()
+foreach($item in $plan | Where-Object { $_.Kind -eq 'Preference' }) {
+    try { $arguments=@{ErrorAction='Stop'};$arguments[$item.Setting]=$item.Desired;Set-MpPreference @arguments }
+    catch { $failures.Add($item.Setting+': '+$_.Exception.Message) }
 }
-
-$cfaMode = if ($Profile -eq "AuditFirst") { "AuditMode" } else { "Enabled" }
 try {
-    Set-MpPreference -EnableControlledFolderAccess $cfaMode -ErrorAction Stop
-    Write-Host "[OK] Controlled Folder Access => $cfaMode" -ForegroundColor Green
-} catch {
-    Write-Host "[POLICY/ERROR] CFA: $($_.Exception.Message)" -ForegroundColor Yellow
-    Write-SentinelError -Root $Root -Component "DefenderHardening" -Operation "Controlled Folder Access" -Exception $_.Exception -Severity "MEDIUM"
-}
-
-try {
-    $current = Get-SentinelAsrTable
-    $map = @{}
-    foreach ($rule in $current) { $map[[string]$rule.Id] = [int]$rule.Action }
-
-    $desiredAction = if ($Profile -eq "AuditFirst") { 2 } else { 1 }
-    foreach ($id in $AsrNames.Keys) { $map[$id.ToLowerInvariant()] = $desiredAction }
-
-    $ids = @($map.Keys)
-    $actions = @($ids | ForEach-Object { [int]$map[$_] })
+    $map=@{}
+    foreach($rule in @(Get-SentinelAsrTable)) { $map[[string]$rule.Id]=[int]$rule.Action }
+    foreach($item in $plan | Where-Object { $_.Kind -eq 'ASR' }) { $map[$item.Setting]=[int]$item.Desired }
+    $ids=@($map.Keys);$actions=@($ids | ForEach-Object { $map[$_] })
     Set-MpPreference -AttackSurfaceReductionRules_Ids $ids -AttackSurfaceReductionRules_Actions $actions -ErrorAction Stop
-
-    $modeName = if ($desiredAction -eq 2) { "AuditMode" } else { "Enabled" }
-    Write-Host ("[OK] {0} selected ASR rules => {1}" -f $AsrNames.Count,$modeName) -ForegroundColor Green
-} catch {
-    Write-Host "[POLICY/ERROR] ASR: $($_.Exception.Message)" -ForegroundColor Yellow
-    Write-SentinelError -Root $Root -Component "DefenderHardening" -Operation "ASR rules" -Exception $_.Exception -Severity "MEDIUM"
+} catch { $failures.Add('ASR: '+$_.Exception.Message) }
+$actual=Get-CoreSnapshot
+foreach($item in $plan | Where-Object { $_.Kind -ne 'Unavailable' }) {
+    if($item.Kind -eq 'ASR') { $value=@($actual.Preference.AttackSurfaceReductionRules | Where-Object { $_.Id -ieq $item.Setting } | Select-Object -ExpandProperty Action) }
+    else { $value=$actual.Preference.($item.Setting) }
+    if((ConvertTo-SentinelPreferenceValue $item.Setting $value) -ine (ConvertTo-SentinelPreferenceValue $item.Setting $item.Desired)) { $failures.Add('Post-apply mismatch: '+$item.Setting+' desired='+$item.Desired+' actual='+$value) }
 }
-
-Write-Host "`nApplied profile: $Profile" -ForegroundColor Cyan
-Write-Host "Tamper Protection / Intune / GPO may intentionally reject or override local changes."
-Write-Host "Run: .\DefenderHardening.ps1 -Profile Status"
+$audit=[ordered]@{Type='DefenderProfileApplied';Severity=$(if($failures.Count){'HIGH'}else{'MEDIUM'});Profile=$Profile;Operator=[Security.Principal.WindowsIdentity]::GetCurrent().Name;Backup=$backupPath;Verified=($failures.Count -eq 0);Unavailable=@($plan | Where-Object Kind -eq 'Unavailable' | Select-Object -ExpandProperty Setting);Failures=@($failures)}
+if(-not (Write-SentinelJsonLine (Join-Path $logs 'administration.jsonl') $audit)) { throw 'Cannot persist Defender hardening audit.' }
+Write-Output $audit
+if($failures.Count) { throw ('Some changes failed or were overridden by policy/tamper protection. Review the backup and audit: '+$backupPath) }

@@ -162,6 +162,7 @@ function Save-Connections {
 }
 
 
+if ($config.Resources) { Assert-SentinelStorage -Root $Root -Config $config -Evidence }
 $eventId = [guid]::NewGuid().ToString()
 $eventDirectory = Join-Path $evidenceRoot $eventId
 New-Item $eventDirectory -ItemType Directory -Force | Out-Null

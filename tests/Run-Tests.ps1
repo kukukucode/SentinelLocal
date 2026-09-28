@@ -1,9 +1,9 @@
 ﻿param([string]$ScratchRoot=(Join-Path $env:TEMP ('SentinelLocal-tests-'+[guid]::NewGuid().ToString('N'))))
 $ErrorActionPreference='Stop'
 $packageRoot=Split-Path -Parent $PSScriptRoot
-. (Join-Path $packageRoot 'Common.ps1')
-. (Join-Path $packageRoot 'SysmonMonitoring.ps1')
-. (Join-Path $packageRoot 'Status.ps1')
+. (Join-Path $packageRoot 'src\Common.ps1')
+. (Get-SentinelSourcePath $packageRoot 'SysmonMonitoring.ps1')
+. (Get-SentinelSourcePath $packageRoot 'Status.ps1')
 if (Test-Path -LiteralPath $ScratchRoot) { throw 'Test directory already exists; refusing to overwrite.' }
 New-Item -ItemType Directory -Path $ScratchRoot | Out-Null
 $results=[Collections.Generic.List[object]]::new()
@@ -15,7 +15,7 @@ function Run-Test([string]$Name,[scriptblock]$Body) {
 function New-ProbeRoot([string]$Name) {
     $path=Join-Path $ScratchRoot $Name
     New-Item -ItemType Directory -Path $path | Out-Null
-    Copy-Item -LiteralPath (Join-Path $packageRoot 'Config.json') -Destination $path
+    Copy-Item -LiteralPath (Get-SentinelSourcePath $packageRoot 'Config.json') -Destination $path
     return $path
 }
 function Add-Probe([string]$Path,[int]$Number) { Assert (Write-SentinelJsonLine -Path $Path -Data ([ordered]@{Type='Probe';Number=$Number})) 'Probe append failed' }
@@ -47,7 +47,7 @@ Run-Test 'All package scripts parse on Windows PowerShell' {
         $tokens=$null; $errors=$null; [void][Management.Automation.Language.Parser]::ParseFile($file.FullName,[ref]$tokens,[ref]$errors)
         Assert ($errors.Count -eq 0) ($file.Name+': '+(($errors | ForEach-Object Message)-join '; '))
     }
-    foreach ($name in Get-SentinelPackageFiles) { Assert (Test-Path -LiteralPath (Join-Path $packageRoot $name)) ('Package file missing: '+$name) }
+    foreach ($name in Get-SentinelPackageFiles) { Assert (Test-Path -LiteralPath (Get-SentinelSourcePath $packageRoot $name)) ('Package file missing: '+$name) }
 }
 Run-Test 'Valid chained records pass checkpoint verification' {
     $root=New-ProbeRoot 'valid'; $path=Join-Path $root 'logs\probe.jsonl'; Add-Probe $path 1; Add-Probe $path 2
@@ -131,7 +131,7 @@ Run-Test 'Defender scan failure propagates to worker retry path' {
     function Start-MpScan { [CmdletBinding()]param($ScanType,$ScanPath); throw 'Mock scan failure' }
     function Write-EventLog { }
     $failed=$false
-    try { & (Join-Path $packageRoot 'Response.ps1') -Root $root -FilePath $file -Score 40 | Out-Null } catch { $failed=$_.Exception.Message -like '*Mock scan failure*' }
+    try { & (Get-SentinelSourcePath $packageRoot 'Response.ps1') -Root $root -FilePath $file -Score 40 | Out-Null } catch { $failed=$_.Exception.Message -like '*Mock scan failure*' }
     Assert $failed 'Response returned success after failed scan'
 }
 Run-Test 'Missing target and completed scan have distinct outcomes' {
@@ -139,10 +139,10 @@ Run-Test 'Missing target and completed scan have distinct outcomes' {
     function Start-MpScan { [CmdletBinding()]param($ScanType,$ScanPath) }
     function Get-MpThreatDetection { [CmdletBinding()]param(); return @() }
     function Start-Sleep { }
-    $missing=& (Join-Path $packageRoot 'Response.ps1') -Root $root -FilePath (Join-Path $root 'missing.txt') -Score 40
+    $missing=& (Get-SentinelSourcePath $packageRoot 'Response.ps1') -Root $root -FilePath (Join-Path $root 'missing.txt') -Score 40
     Assert ($missing.Status -eq 'TargetMissing' -and -not $missing.DefenderCustomScanStarted) 'Missing target was marked scanned'
     $file=Join-Path $root 'harmless.txt'; Set-Content $file 'harmless'
-    $scanned=& (Join-Path $packageRoot 'Response.ps1') -Root $root -FilePath $file -Score 40
+    $scanned=& (Get-SentinelSourcePath $packageRoot 'Response.ps1') -Root $root -FilePath $file -Score 40
     Assert ($scanned.Status -eq 'Completed' -and $scanned.DefenderCustomScanStarted) 'Completed scan not recorded'
 }
 Run-Test 'More than 300 unread events are consumed without gaps' {
@@ -175,7 +175,7 @@ Run-Test 'Busy process requires fresh heartbeat and bounded request time' {
 }
 Run-Test 'Response subprocess success and timeout are both handled' {
     $root=New-ProbeRoot 'bounded'
-    foreach ($name in @('Common.ps1','LogIntegrity.ps1','EventMonitoring.ps1','ResponseExecution.ps1','Invoke-SentinelResponse.ps1')) { Copy-Item -LiteralPath (Join-Path $packageRoot $name) -Destination $root }
+    foreach ($name in @('Common.ps1','LogIntegrity.ps1','EventMonitoring.ps1','ResponseExecution.ps1','OperationalSafety.ps1','Deployment.ps1','PackageTrust.ps1','PolicyManagement.ps1','Invoke-SentinelResponse.ps1')) { Copy-Item -LiteralPath (Get-SentinelSourcePath $packageRoot $name) -Destination $root }
     $request=Join-Path $root 'request.json'; Set-Content $request '{}'
     $responsePath=Join-Path $root 'Response.ps1'; Set-Content $responsePath 'param($Root,$RequestFile); [pscustomobject]@{Status="Completed"}' -Encoding UTF8
     $completed=Invoke-SentinelBoundedResponse -Root $root -RequestFile $request -TimeoutSeconds 20 -HeartbeatSeconds 1
@@ -208,16 +208,16 @@ Run-Test 'Disabled Sysmon integration does not query or alter its channel' {
 Run-Test 'Audit export creates independently verifiable snapshots' {
     $root=New-ProbeRoot 'export'; $path=Join-Path $root 'logs\probe.jsonl'; Add-Probe $path 1; Add-Probe $path 2
     $destination=Join-Path $ScratchRoot 'collector'
-    $snapshot=& (Join-Path $packageRoot 'Export-SentinelAudit.ps1') -Root $root -DestinationPath $destination
+    $snapshot=& (Get-SentinelSourcePath $packageRoot 'Export-SentinelAudit.ps1') -Root $root -DestinationPath $destination
     Assert (Test-Path -LiteralPath (Join-Path $snapshot 'manifest.json')) 'Export manifest missing'
     Assert (Get-SentinelLogVerification (Join-Path $snapshot 'logs\probe.jsonl')).Valid 'Exported chain does not verify'
     $manifest=Get-Content (Join-Path $snapshot 'manifest.json') -Raw | ConvertFrom-Json
     Assert ($manifest.Files[0].SHA256 -eq (Get-FileHash (Join-Path $snapshot 'logs\probe.jsonl')).Hash) 'Snapshot digest mismatch'
-    $failed=$false; try { & (Join-Path $packageRoot 'Export-SentinelAudit.ps1') -Root $root -DestinationPath (Join-Path $root 'self-export') | Out-Null } catch { $failed=$true }
+    $failed=$false; try { & (Get-SentinelSourcePath $packageRoot 'Export-SentinelAudit.ps1') -Root $root -DestinationPath (Join-Path $root 'self-export') | Out-Null } catch { $failed=$true }
     Assert $failed 'Export recursively targeted installation folder'
 }
 Run-Test 'Self-generated response command cannot cause a scan feedback loop' {
-    $root=New-ProbeRoot 'internal-response'; $task=Join-Path $root 'Invoke-SentinelResponse.ps1'; Copy-Item -LiteralPath (Join-Path $packageRoot 'Invoke-SentinelResponse.ps1') -Destination $task
+    $root=New-ProbeRoot 'internal-response'; $task=Join-Path $root 'Invoke-SentinelResponse.ps1'; Copy-Item -LiteralPath (Get-SentinelSourcePath $packageRoot 'Invoke-SentinelResponse.ps1') -Destination $task
     Write-SentinelAtomicJson (Join-Path $root 'state\integrity-baseline.json') ([ordered]@{Files=@([ordered]@{Name='Invoke-SentinelResponse.ps1';SHA256=(Get-FileHash $task).Hash})})
     $request=Join-Path $root 'state\response-queue\processing\20260101000000000_11111111-1111-1111-1111-111111111111.json'
     $command="& '{0}' -Root '{1}' -RequestFile '{2}' -ResultPath '{3}'" -f $task,$root,$request,($request+'.result')
@@ -243,7 +243,7 @@ Run-Test 'Enabled Sysmon records events and queues literal script arguments' {
 }
 Run-Test 'Worker retries failed scan and deduplicates only completed scans' {
     $root=New-ProbeRoot 'worker-integration'
-    foreach ($name in @('Common.ps1','LogIntegrity.ps1','EventMonitoring.ps1','ResponseExecution.ps1','ResponseWorker.ps1','Invoke-SentinelResponse.ps1')) { Copy-Item -LiteralPath (Join-Path $packageRoot $name) -Destination $root }
+    foreach ($name in @('Common.ps1','LogIntegrity.ps1','EventMonitoring.ps1','ResponseExecution.ps1','OperationalSafety.ps1','Deployment.ps1','PackageTrust.ps1','PolicyManagement.ps1','ResponseWorker.ps1','Invoke-SentinelResponse.ps1')) { Copy-Item -LiteralPath (Get-SentinelSourcePath $packageRoot $name) -Destination $root }
     [IO.File]::AppendAllText((Join-Path $root 'Common.ps1'),"`nfunction Write-EventLog { }`n")
     $workerPath=Join-Path $root 'ResponseWorker.ps1'
     $workerText=[IO.File]::ReadAllText($workerPath).Replace('Global\SentinelLocalResponseWorker','Global\SentinelLocalTestWorker_'+[guid]::NewGuid().ToString('N'))
@@ -255,7 +255,7 @@ Run-Test 'Worker retries failed scan and deduplicates only completed scans' {
 param($Root,$RequestFile)
 $request=Get-Content -LiteralPath $RequestFile -Raw -Encoding UTF8 | ConvertFrom-Json
 if ([int]$request.Attempts -eq 0) { throw 'Mock first scan fails' }
-[pscustomobject]@{Status='Completed'}
+[pscustomobject]@{Status='Completed';File=[pscustomobject]@{SHA256=(Get-FileHash -LiteralPath $request.FilePath -Algorithm SHA256).Hash}}
 '@
     Set-Content -LiteralPath (Join-Path $root 'Response.ps1') -Value $response -Encoding UTF8
     $target=Join-Path $root 'harmless.txt'; Set-Content $target 'harmless worker fixture'
@@ -295,7 +295,7 @@ Run-Test 'Lightweight status detects checkpoint/log deletion' {
 }
 Run-Test 'GUI constructs and disposes without showing a window in smoke mode' {
     $root=New-ProbeRoot 'ui'
-    $command="& '{0}' -Root '{1}' -SmokeTest" -f (Join-Path $packageRoot 'Show-SentinelStatus.ps1').Replace("'","''"),$root.Replace("'","''")
+    $command="& '{0}' -Root '{1}' -SmokeTest" -f (Get-SentinelSourcePath $packageRoot 'Show-SentinelStatus.ps1').Replace("'","''"),$root.Replace("'","''")
     $child=Start-ProbeProcess $command
     try { Assert ($child.Process.WaitForExit(30000)) 'GUI construction timed out'; Assert ($child.Process.ExitCode -eq 0) $child.Err.Result }
     finally { if (-not $child.Process.HasExited) { $child.Process.Kill() }; $child.Process.Dispose() }

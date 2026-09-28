@@ -1,6 +1,10 @@
 ﻿. (Join-Path $PSScriptRoot 'LogIntegrity.ps1')
 . (Join-Path $PSScriptRoot 'EventMonitoring.ps1')
 . (Join-Path $PSScriptRoot 'ResponseExecution.ps1')
+. (Join-Path $PSScriptRoot 'OperationalSafety.ps1')
+. (Join-Path $PSScriptRoot 'Deployment.ps1')
+. (Join-Path $PSScriptRoot 'PackageTrust.ps1')
+. (Join-Path $PSScriptRoot 'PolicyManagement.ps1')
 
 function Get-SentinelStringHash {
     param([Parameter(Mandatory=$true)][string]$Text)
@@ -34,6 +38,9 @@ function Write-SentinelJsonLine {
     try {
         $payload=ConvertTo-SentinelOrderedMap $Data
         $payload['Timestamp']=(Get-Date).ToString('o')
+        if ($config -and $config.Resources -and (Test-Path -LiteralPath $Path)) {
+            if ((Get-Item -LiteralPath $Path).Length -ge ([long]$config.Resources.MaxLogFileMB*1MB)) { throw 'Log capacity reached; use verified audit export and retention.' }
+        }
         Add-SentinelChainedRecord -Path $Path -Payload $payload
         if ([string]$payload['Severity'] -in @('HIGH','CRITICAL')) {
             try {
@@ -333,6 +340,15 @@ function Get-SentinelCriticalFileNames {
     return @(
         "Common.ps1",
         "LogIntegrity.ps1",
+        "OperationalSafety.ps1",
+        "Deployment.ps1",
+        "PackageTrust.ps1",
+        "PolicyManagement.ps1",
+        "Test-SentinelReadiness.ps1",
+        "Export-SentinelReport.ps1",
+        "Set-SentinelPolicy.ps1",
+        "New-SentinelPackage.ps1",
+        "Verify-SentinelPackage.ps1",
         "EventMonitoring.ps1",
         "ResponseExecution.ps1",
         "SysmonMonitoring.ps1",
@@ -362,3 +378,26 @@ function Get-SentinelCriticalFileNames {
 }
 
 function Get-SentinelPackageFiles { return @(Get-SentinelCriticalFileNames) }
+
+function Get-SentinelSourceRoot {
+    param([string]$Directory)
+    $path=[IO.Path]::GetFullPath($Directory)
+    $parent=Split-Path -Parent $path
+    if((Split-Path -Leaf $path) -in @('src','scripts') -and (Test-Path -LiteralPath (Join-Path $parent 'config\Config.json') -PathType Leaf)) { return $parent }
+    return $path
+}
+
+function Get-SentinelSourcePath {
+    param([string]$Root,[string]$Name)
+    if($Name -notin @(Get-SentinelPackageFiles) -and $Name -notin @('README.md','README_JP.txt','CHANGELOG.txt','docs/OPERATIONS_JP.md','docs/PILOT_JP.md','docs/REPOSITORY_JP.md')) { throw 'Unknown SentinelLocal source file.' }
+    # Installed and distribution packages retain their flat file layout.
+    $flat=Join-Path $Root $Name
+    if(Test-Path -LiteralPath $flat -PathType Leaf) { return [IO.Path]::GetFullPath($flat) }
+    $runtime=@('Common.ps1','LogIntegrity.ps1','EventMonitoring.ps1','ResponseExecution.ps1','OperationalSafety.ps1','Deployment.ps1','PackageTrust.ps1','PolicyManagement.ps1','DefenderHealth.ps1','Response.ps1','ResponseWorker.ps1','Watcher.ps1','IntegrityMonitor.ps1','Invoke-SentinelResponse.ps1','Status.ps1','SysmonMonitoring.ps1')
+    $relative=if($Name -eq 'Config.json') { 'config\Config.json' }
+        elseif($Name -eq 'README_JP.txt') { 'docs\README_JP.txt' }
+        elseif($Name -in $runtime) { 'src\'+$Name }
+        elseif($Name -like '*.ps1') { 'scripts\'+$Name }
+        else { $Name }
+    return [IO.Path]::GetFullPath((Join-Path $Root $relative))
+}

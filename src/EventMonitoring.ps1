@@ -86,6 +86,7 @@ function Save-SentinelDecodedCommand {
     } catch [FormatException] { return $null }
     catch [Text.DecoderFallbackException] { return $null }
     $hash=Get-SentinelStringHash $text
+    if($config -and $config.Resources) { Assert-SentinelStorage -Root $Root -Config $config -Evidence }
     $directory=Join-Path $Root ('evidence\decoded-'+$hash)
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
     $path=Join-Path $directory 'payload.ps1'
