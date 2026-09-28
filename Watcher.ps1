@@ -14,10 +14,14 @@ try {
     throw
 }
 
+Assert-SentinelConfig $config
 $logs = Join-Path $Root "logs"
 $state = Join-Path $Root "state"
 $evidence = Join-Path $Root "evidence"
 New-Item $logs,$state,$evidence -ItemType Directory -Force | Out-Null
+$watcherCreated=$false
+$watcherMutex=[Threading.Mutex]::new($true,'Global\SentinelLocalWatcher',[ref]$watcherCreated)
+if(-not $watcherCreated) { throw 'A SentinelLocal Watcher already owns this host; duplicate monitoring refused.' }
 
 $eventLog = Join-Path $logs "events.log"
 $alertLog = Join-Path $logs "alerts.jsonl"
@@ -71,7 +75,7 @@ function Save-ResponsePathDedupe {
                 Score=[int]$responsePathDedupe[$_].Score
             }
         })
-        ConvertTo-Json -InputObject @($rows) -Depth 5 | Set-Content -LiteralPath $responseDedupeStatePath -Encoding UTF8 -ErrorAction Stop
+        Write-SentinelAtomicJson $responseDedupeStatePath @($rows)
     } catch {
         Write-SentinelError -Root $Root -Component "Watcher" -Operation "Save response path dedupe state" -Exception $_.Exception -Severity "MEDIUM"
     }
@@ -111,7 +115,7 @@ function Write-Heartbeat {
         LastDefenderRecordId = $LastDefenderRecordId
     }
     try {
-        $heartbeat | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $heartbeatPath -Encoding UTF8 -ErrorAction Stop
+        Write-SentinelAtomicJson $heartbeatPath $heartbeat
     } catch {
         Write-SentinelError -Root $Root -Component "Watcher" -Operation "Write heartbeat" -Exception $_.Exception
     }
@@ -229,7 +233,7 @@ function Get-ProcessScore {
         $score+=45; $reasons.Add("Executable launched from Temp")
     }
 
-    if ($name -match '(?i)^(mshta|wscript|cscript|powershell|pwsh|rundll32|regsvr32|certutil|bitsadmin)\.exe$') {
+    if ($name -match '(?i)^(cmd|mshta|wscript|cscript|powershell|pwsh|rundll32|regsvr32|certutil|bitsadmin)\.exe$') {
         $score+=10; $reasons.Add("Living-off-the-land binary")
         if ($commandLine -match '(?i)(-enc|-encodedcommand|frombase64string|downloadstring|invoke-webrequest|\biwr\b|\bcurl\b|https?://)') {
             $score+=45; $reasons.Add("Suspicious script/network command line")
@@ -310,7 +314,8 @@ function Queue-SentinelResponse {
             $creation = if ($ObservedProcess -and $ObservedProcess.CreationDate) { [string]$ObservedProcess.CreationDate } else { "" }
             $processIdentityPart = "|PID=" + $ProcessIdValue + "|CREATED=" + $creation
         }
-        $pathKey = Get-SentinelStringHash ("PATH|" + $normalizedPath + $processIdentityPart)
+        $contentIdentity = Get-SentinelFileIdentity $FilePath
+        $pathKey = Get-SentinelStringHash ("PATH|" + $normalizedPath + $processIdentityPart + "|SHA256=" + $contentIdentity)
         $now = [datetimeoffset]::Now
 
         if ($responsePathDedupe.ContainsKey($pathKey)) {
@@ -338,6 +343,7 @@ function Queue-SentinelResponse {
         $priority = if ($Score -ge [int]$config.ResponseQueueHighScore) { "High" } else { "Normal" }
         $queueDirectory = if ($priority -eq "High") { $responseQueueHigh } else { $responseQueueNormal }
 
+        Assert-SentinelQueueCapacity -Root $Root -Config $config -Priority $priority
         $initialConnections = if ($ProcessIdValue -gt 0 -and $Score -ge [int]$config.ScorePolicy.DefenderCustomScan) {
             @(Get-ImmediateNetworkSnapshot $ProcessIdValue)
         } else {
@@ -353,6 +359,7 @@ function Queue-SentinelResponse {
             FilePath=$FilePath
             NormalizedPath=$normalizedPath
             PathDedupeKey=$pathKey
+            ObservedSHA256=$contentIdentity
             ProcessIdValue=$ProcessIdValue
             Score=$Score
             Reasons=@($Reasons)
@@ -410,6 +417,7 @@ function Get-PersistenceSnapshot {
         }
     } catch {
         Write-SentinelError -Root $Root -Component "Watcher" -Operation "Snapshot Run persistence" -Exception $_.Exception
+        throw
     }
 
     try {
@@ -420,23 +428,28 @@ function Get-PersistenceSnapshot {
         foreach ($startupDirectory in $startupDirectories) {
             if (Test-Path $startupDirectory) {
                 Get-ChildItem $startupDirectory -Force -File -ErrorAction Stop | ForEach-Object {
-                    $items.Add([pscustomobject]@{Type="Startup";Key=$_.FullName;Value="$($_.Length)|$($_.LastWriteTimeUtc.Ticks)"})
+                    $startupHash=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
+                    $items.Add([pscustomobject]@{Type="Startup";Key=$_.FullName;Value="$($_.Length)|$($_.LastWriteTimeUtc.Ticks)|$startupHash"})
                 }
             }
         }
     } catch {
         Write-SentinelError -Root $Root -Component "Watcher" -Operation "Snapshot Startup persistence" -Exception $_.Exception
+        throw
     }
 
     try {
         Get-ScheduledTask -ErrorAction Stop | ForEach-Object {
             $task=$_
+            $actionIndex=0
             foreach ($action in $task.Actions) {
-                $items.Add([pscustomobject]@{Type="Task";Key="$($task.TaskPath)$($task.TaskName)";Value=(("{0} {1}" -f $action.Execute,$action.Arguments).Trim())})
+                $items.Add([pscustomobject]@{Type="Task";Key="$($task.TaskPath)$($task.TaskName)|Action=$actionIndex";Value=(("{0} {1}" -f $action.Execute,$action.Arguments).Trim())})
+                $actionIndex++
             }
         }
     } catch {
         Write-SentinelError -Root $Root -Component "Watcher" -Operation "Snapshot scheduled tasks" -Exception $_.Exception
+        throw
     }
 
     try {
@@ -445,6 +458,7 @@ function Get-PersistenceSnapshot {
         }
     } catch {
         Write-SentinelError -Root $Root -Component "Watcher" -Operation "Snapshot services" -Exception $_.Exception
+        throw
     }
 
     return @($items)
@@ -484,17 +498,25 @@ function Compare-Persistence {
     foreach ($item in $New) {
         $identity="$($item.Type)|$($item.Key)"
         if ((-not $oldMap.ContainsKey($identity)) -or ($oldMap[$identity] -ne [string]$item.Value)) {
+            if (-not (Write-SentinelJsonLine -Path $alertLog -Data ([ordered]@{Type='PersistenceChange';Severity='MEDIUM';Item=$item;PreviousValue=$oldMap[$identity]}))) { throw 'Cannot persist persistence change.' }
             $scoreResult=Get-PersistenceScore $item
             if ($scoreResult.Score -ge [int]$config.ScorePolicy.DefenderCustomScan) {
-                [void](Write-SentinelJsonLine -Path $alertLog -Data ([ordered]@{
+                if (-not (Write-SentinelJsonLine -Path $alertLog -Data ([ordered]@{
                     Type="Persistence";Score=$scoreResult.Score;Reasons=$scoreResult.Reasons;Item=$item
-                }))
+                }))) { throw "Cannot persist suspicious persistence entry." }
                 Write-AppEvent ("Suspicious persistence: {0}`n{1}`n{2}" -f $item.Type,$item.Key,($scoreResult.Reasons -join "; "))
                 $candidate = if ($item.Type -eq "Startup") { $item.Key } else { Get-ExecutableFromValue $item.Value }
                 if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf) -and -not (Test-SentinelException -Path $candidate -Config $config)) {
                     Queue-SentinelResponse -FilePath $candidate -Score $scoreResult.Score -Reasons $scoreResult.Reasons -Source "Persistence"
                 }
             }
+        }
+    }
+    $newIdentities=@{}
+    foreach($item in $New) { $newIdentities["$($item.Type)|$($item.Key)"]=$true }
+    foreach($item in $Old) {
+        if(-not $newIdentities.ContainsKey("$($item.Type)|$($item.Key)")) {
+            if(-not (Write-SentinelJsonLine -Path $alertLog -Data ([ordered]@{Type='PersistenceRemoved';Severity='MEDIUM';Item=$item}))) { throw 'Cannot persist removed persistence entry.' }
         }
     }
 }
@@ -934,7 +956,7 @@ function Check-UnresolvedDefenderDetections {
 Load-PendingDefenderDetections
 
 $startedAt = Get-Date
-Write-TextLog "SentinelLocal v1.1.0 watcher started."
+Write-TextLog "SentinelLocal v1.2.0 watcher started."
 
 try {
     Register-CimIndicationEvent -Query "SELECT * FROM Win32_ProcessStartTrace" -SourceIdentifier "SentinelLocal.ProcessStart" -ErrorAction Stop | Out-Null
@@ -943,7 +965,8 @@ try {
     throw
 }
 
-$baseline=Get-PersistenceSnapshot
+$initialSnapshot=Get-PersistenceSnapshot
+Update-SentinelPersistenceSnapshot -Root $Root -Current $initialSnapshot -Compare { param($old,$new) Compare-Persistence $old $new }
 $lastPersistence=Get-Date
 $lastHealth=(Get-Date).AddSeconds(-1 * [int]$config.DefenderHealthPollSeconds)
 $lastHeartbeat=(Get-Date).AddSeconds(-1 * [int]$config.HeartbeatSeconds)
@@ -1021,6 +1044,9 @@ while ($true) {
                     }
                 }
             }
+            if (-not $processInfo) {
+                [void](Write-SentinelJsonLine -Path $alertLog -Data ([ordered]@{Type='ProcessObservationGap';Severity='MEDIUM';ProcessId=$processIdValue;ProcessName=[string]$processEvent.SourceEventArgs.NewEvent.ProcessName;Reason='Process ended before metadata capture. Enable existing Sysmon process-create telemetry for durable metadata.'}))
+            }
             Remove-Event -EventIdentifier $processEvent.EventIdentifier -ErrorAction SilentlyContinue
         }
     } catch {
@@ -1047,10 +1073,11 @@ while ($true) {
     }
 
     if (((Get-Date)-$lastPersistence).TotalSeconds -ge [int]$config.PersistencePollSeconds) {
-        $newSnapshot=Get-PersistenceSnapshot
-        Compare-Persistence $baseline $newSnapshot
-        $baseline=$newSnapshot
-        $lastPersistence=Get-Date
+        try {
+            $newSnapshot=Get-PersistenceSnapshot
+            Update-SentinelPersistenceSnapshot -Root $Root -Current $newSnapshot -Compare { param($old,$new) Compare-Persistence $old $new }
+            $lastPersistence=Get-Date
+        } catch { Write-SentinelError -Root $Root -Component Watcher -Operation 'Durable persistence comparison' -Exception $_.Exception; $lastPersistence=Get-Date }
     }
 
     if (((Get-Date)-$lastHealth).TotalSeconds -ge [int]$config.DefenderHealthPollSeconds) {

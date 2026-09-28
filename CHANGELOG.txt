@@ -1,4 +1,16 @@
-﻿SentinelLocal v1.1.0
+﻿SentinelLocal v1.2.0 - Single-PC pilot
+
+- Content-bound queue deduplication; durable persistence comparison across restarts.
+- Queue reserve, normal-lane aging, free-space/evidence/log capacity checks.
+- Complete deployment rollback with baseline restoration and startup verification.
+- Read-only Windows readiness checks and bounded HTML/JSON investigation timeline.
+- Validated policy overlays with backup, administration audit and restoration.
+- Hardening preview, existing stronger setting preservation and post-apply verification.
+- SHA-256 package manifests and optional pinned code-signing CMS verification.
+- Added pilot regression suite and Windows CI validation.
+- No equivalence to commercial endpoint protection is claimed; real deployment/scans remain acceptance tests.
+
+SentinelLocal v1.1.0
 
 RELIABILITY
 - Failed scans/results/evidence now propagate to retry handling; missing targets have a distinct outcome.

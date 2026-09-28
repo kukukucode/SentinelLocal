@@ -1,6 +1,10 @@
-﻿v1.1の追加機能・設定手順は docs\OPERATIONS_JP.md を参照してください。
+﻿v1.2 single-PC pilot: docs/PILOT_JP.md
+Install/upgrade unsigned pilot: -AllowUnsignedPackage is now required.
+Use DefenderHardening.ps1 separately; the former installer audit-profile switch was removed.
 
-SentinelLocal v1.1.0（Windows専用）
+v1.1の追加機能・設定手順は docs\OPERATIONS_JP.md を参照してください。
+
+SentinelLocal v1.2.0（Windows専用）
 ==================
 
 位置づけ

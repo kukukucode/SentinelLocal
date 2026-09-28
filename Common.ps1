@@ -1,6 +1,10 @@
 ﻿. (Join-Path $PSScriptRoot 'LogIntegrity.ps1')
 . (Join-Path $PSScriptRoot 'EventMonitoring.ps1')
 . (Join-Path $PSScriptRoot 'ResponseExecution.ps1')
+. (Join-Path $PSScriptRoot 'OperationalSafety.ps1')
+. (Join-Path $PSScriptRoot 'Deployment.ps1')
+. (Join-Path $PSScriptRoot 'PackageTrust.ps1')
+. (Join-Path $PSScriptRoot 'PolicyManagement.ps1')
 
 function Get-SentinelStringHash {
     param([Parameter(Mandatory=$true)][string]$Text)
@@ -34,6 +38,9 @@ function Write-SentinelJsonLine {
     try {
         $payload=ConvertTo-SentinelOrderedMap $Data
         $payload['Timestamp']=(Get-Date).ToString('o')
+        if ($config -and $config.Resources -and (Test-Path -LiteralPath $Path)) {
+            if ((Get-Item -LiteralPath $Path).Length -ge ([long]$config.Resources.MaxLogFileMB*1MB)) { throw 'Log capacity reached; use verified audit export and retention.' }
+        }
         Add-SentinelChainedRecord -Path $Path -Payload $payload
         if ([string]$payload['Severity'] -in @('HIGH','CRITICAL')) {
             try {
@@ -333,6 +340,15 @@ function Get-SentinelCriticalFileNames {
     return @(
         "Common.ps1",
         "LogIntegrity.ps1",
+        "OperationalSafety.ps1",
+        "Deployment.ps1",
+        "PackageTrust.ps1",
+        "PolicyManagement.ps1",
+        "Test-SentinelReadiness.ps1",
+        "Export-SentinelReport.ps1",
+        "Set-SentinelPolicy.ps1",
+        "New-SentinelPackage.ps1",
+        "Verify-SentinelPackage.ps1",
         "EventMonitoring.ps1",
         "ResponseExecution.ps1",
         "SysmonMonitoring.ps1",

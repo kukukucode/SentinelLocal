@@ -9,3 +9,7 @@ backups/
 .idea/
 Thumbs.db
 Desktop.ini
+
+reports/
+readiness*.json
+package.manifest.json*

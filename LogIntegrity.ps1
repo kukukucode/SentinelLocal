@@ -7,7 +7,7 @@ function Write-SentinelAtomicJson {
     $temp = $Path + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
     try {
         $encoding=[System.Text.UTF8Encoding]::new($true)
-        $bytes = $encoding.GetPreamble() + $encoding.GetBytes(($Data | ConvertTo-Json -Depth 20 -Compress))
+        $bytes = $encoding.GetPreamble() + $encoding.GetBytes((ConvertTo-Json -InputObject $Data -Depth 20 -Compress))
         $stream = [System.IO.File]::Open($temp,[System.IO.FileMode]::CreateNew,[System.IO.FileAccess]::Write,[System.IO.FileShare]::None)
         try { $stream.Write($bytes,0,$bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
         if ([System.IO.File]::Exists($Path)) { [System.IO.File]::Replace($temp,$Path,[NullString]::Value) }

@@ -48,7 +48,7 @@ function Write-GuardianHeartbeat {
         LastUpdated=(Get-Date).ToString("o")
     }
     try {
-        $data | ConvertTo-Json -Compress | Set-Content -LiteralPath $heartbeatPath -Encoding UTF8 -ErrorAction Stop
+        Write-SentinelAtomicJson $heartbeatPath $data
     } catch {
         Write-SentinelError -Root $Root -Component "IntegrityMonitor" -Operation "Write heartbeat" -Exception $_.Exception
     }

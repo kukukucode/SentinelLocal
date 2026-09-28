@@ -175,7 +175,7 @@ Run-Test 'Busy process requires fresh heartbeat and bounded request time' {
 }
 Run-Test 'Response subprocess success and timeout are both handled' {
     $root=New-ProbeRoot 'bounded'
-    foreach ($name in @('Common.ps1','LogIntegrity.ps1','EventMonitoring.ps1','ResponseExecution.ps1','Invoke-SentinelResponse.ps1')) { Copy-Item -LiteralPath (Join-Path $packageRoot $name) -Destination $root }
+    foreach ($name in @('Common.ps1','LogIntegrity.ps1','EventMonitoring.ps1','ResponseExecution.ps1','OperationalSafety.ps1','Deployment.ps1','PackageTrust.ps1','PolicyManagement.ps1','Invoke-SentinelResponse.ps1')) { Copy-Item -LiteralPath (Join-Path $packageRoot $name) -Destination $root }
     $request=Join-Path $root 'request.json'; Set-Content $request '{}'
     $responsePath=Join-Path $root 'Response.ps1'; Set-Content $responsePath 'param($Root,$RequestFile); [pscustomobject]@{Status="Completed"}' -Encoding UTF8
     $completed=Invoke-SentinelBoundedResponse -Root $root -RequestFile $request -TimeoutSeconds 20 -HeartbeatSeconds 1
@@ -243,7 +243,7 @@ Run-Test 'Enabled Sysmon records events and queues literal script arguments' {
 }
 Run-Test 'Worker retries failed scan and deduplicates only completed scans' {
     $root=New-ProbeRoot 'worker-integration'
-    foreach ($name in @('Common.ps1','LogIntegrity.ps1','EventMonitoring.ps1','ResponseExecution.ps1','ResponseWorker.ps1','Invoke-SentinelResponse.ps1')) { Copy-Item -LiteralPath (Join-Path $packageRoot $name) -Destination $root }
+    foreach ($name in @('Common.ps1','LogIntegrity.ps1','EventMonitoring.ps1','ResponseExecution.ps1','OperationalSafety.ps1','Deployment.ps1','PackageTrust.ps1','PolicyManagement.ps1','ResponseWorker.ps1','Invoke-SentinelResponse.ps1')) { Copy-Item -LiteralPath (Join-Path $packageRoot $name) -Destination $root }
     [IO.File]::AppendAllText((Join-Path $root 'Common.ps1'),"`nfunction Write-EventLog { }`n")
     $workerPath=Join-Path $root 'ResponseWorker.ps1'
     $workerText=[IO.File]::ReadAllText($workerPath).Replace('Global\SentinelLocalResponseWorker','Global\SentinelLocalTestWorker_'+[guid]::NewGuid().ToString('N'))
@@ -255,7 +255,7 @@ Run-Test 'Worker retries failed scan and deduplicates only completed scans' {
 param($Root,$RequestFile)
 $request=Get-Content -LiteralPath $RequestFile -Raw -Encoding UTF8 | ConvertFrom-Json
 if ([int]$request.Attempts -eq 0) { throw 'Mock first scan fails' }
-[pscustomobject]@{Status='Completed'}
+[pscustomobject]@{Status='Completed';File=[pscustomobject]@{SHA256=(Get-FileHash -LiteralPath $request.FilePath -Algorithm SHA256).Hash}}
 '@
     Set-Content -LiteralPath (Join-Path $root 'Response.ps1') -Value $response -Encoding UTF8
     $target=Join-Path $root 'harmless.txt'; Set-Content $target 'harmless worker fixture'

@@ -1,4 +1,6 @@
-# SentinelLocal v1.1 運用ガイド（Windows専用）
+# SentinelLocal v1.2 運用ガイド（Windows専用）
+
+1台向けの新しい診断・設定・更新手順は[試験運用ガイド](PILOT_JP.md)を参照してください。
 
 管理者として起動したWindows PowerShell 5.1を使用してください。以下の例のインストール先は`C:\ProgramData\SentinelLocal`です。
 
@@ -10,7 +12,7 @@ Defenderスキャン開始や結果取得、証拠保存に失敗した場合、
 
 応答は別プロセスで実行し、Workerが進捗Heartbeatを更新します。Highの上限は`ResponseTimeoutSeconds`（既定180秒）、Normalは`NormalResponseTimeoutSeconds`（既定60秒）です。時間超過時は応答プロセスを終了し、依頼を再試行します。既にDefenderサービスで開始したスキャン自体の中止を保証するものではありません。
 
-処理は1件ずつで、次の依頼を選ぶときにHighを優先します。実行中のNormalをHighが割り込んで停止する方式ではありません。キューの最古依頼が`QueueWarningSeconds`（既定120秒）を超える、または件数が`QueueWarningCount`（既定1000件）を超えると警告します。
+処理は1件ずつで、次の依頼を選ぶときにHighを優先します。v1.2では待機120秒以上のNormalを、Highを5件連続処理した後に1件選びます。実行中のNormalをHighが割り込んで停止する方式ではありません。キューの最古依頼が`QueueWarningSeconds`（既定120秒）を超える、または件数が`QueueWarningCount`（既定1000件）を超えると警告します。
 
 ## ログ検証と保持
 

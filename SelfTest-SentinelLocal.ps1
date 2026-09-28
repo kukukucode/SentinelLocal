@@ -18,6 +18,7 @@ try {
 }
 
 if ($config) {
+    try { Assert-SentinelConfig $config; Add-Test "Complete configuration policy" $true "validated" } catch { Add-Test "Complete configuration policy" $false $_.Exception.Message }
     Add-Test 'Config: response timeouts' ([int]$config.NormalResponseTimeoutSeconds -ge 1 -and [int]$config.ResponseTimeoutSeconds -ge [int]$config.NormalResponseTimeoutSeconds) 'Normal <= High; both positive'
     Add-Test 'Config: fresh progress interval' ([int]$config.ResponseWorkerHeartbeatSeconds -ge 1 -and [int]$config.ResponseWorkerHeartbeatSeconds -lt [int]$config.ResponseWorkerHeartbeatStaleSeconds) 'Heartbeat interval < stale threshold'
     Add-Test 'Config: event batching' ([int]$config.EventBatchSize -ge 1 -and [int]$config.EventBatchSize -le 10000) 'Batch size within 1..10000'

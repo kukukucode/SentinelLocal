@@ -26,12 +26,12 @@ foreach ($name in Get-SentinelCriticalFileNames) {
     }
 }
 
-[ordered]@{
-    Version="1.1.0"
+Write-SentinelAtomicJson $baselinePath ([ordered]@{
+    Version="1.2.0"
     CreatedAt=(Get-Date).ToString("o")
     Root=$Root
     Files=$entries
-} | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $baselinePath -Encoding UTF8 -ErrorAction Stop
+})
 
 Write-Host "SentinelLocal integrity baseline updated:"
 Write-Host $baselinePath
