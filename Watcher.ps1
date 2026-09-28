@@ -4,6 +4,7 @@
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "Common.ps1")
+. (Join-Path $PSScriptRoot 'SysmonMonitoring.ps1')
 
 $configPath = Join-Path $Root "Config.json"
 try {
@@ -25,6 +26,9 @@ $asrLog = Join-Path $logs "asr-events.jsonl"
 $cfaLog = Join-Path $logs "cfa-events.jsonl"
 $networkProtectionLog = Join-Path $logs "network-protection-events.jsonl"
 $lastDefenderState = Join-Path $state "defender-last-record.txt"
+$defenderCursorPath = Join-Path $state 'defender-cursor.json'
+$defenderCursorTime = ''
+$sysmonCursorPath = Join-Path $state 'sysmon-cursor.json'
 $heartbeatPath = Join-Path $state "watcher-heartbeat.json"
 $integrityHeartbeatPath = Join-Path $state "integrity-monitor-heartbeat.json"
 $responseQueueRoot = Join-Path $state "response-queue"
@@ -206,6 +210,7 @@ function Get-FileSignatureStatus {
 
 function Get-ProcessScore {
     param($ProcessInfo)
+    if (Test-SentinelInternalResponse -Root $Root -ProcessInfo $ProcessInfo) { return [pscustomobject]@{Score=0;Reasons=@('Verified SentinelLocal response invocation')} }
     $score=0
     $reasons=New-Object System.Collections.Generic.List[string]
     $path=[string]$ProcessInfo.ExecutablePath
@@ -376,6 +381,7 @@ function Queue-SentinelResponse {
         }))
     } catch {
         Write-SentinelError -Root $Root -Component "Watcher" -Operation "Queue response request" -Exception $_.Exception -Context @{FilePath=$FilePath;ProcessId=$ProcessIdValue;Score=$Score}
+        throw
     }
 }
 
@@ -485,7 +491,7 @@ function Compare-Persistence {
                 }))
                 Write-AppEvent ("Suspicious persistence: {0}`n{1}`n{2}" -f $item.Type,$item.Key,($scoreResult.Reasons -join "; "))
                 $candidate = if ($item.Type -eq "Startup") { $item.Key } else { Get-ExecutableFromValue $item.Value }
-                if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+                if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf) -and -not (Test-SentinelException -Path $candidate -Config $config)) {
                     Queue-SentinelResponse -FilePath $candidate -Score $scoreResult.Score -Reasons $scoreResult.Reasons -Source "Persistence"
                 }
             }
@@ -556,11 +562,7 @@ function ConvertFrom-DefenderEvent {
         }
     } catch {
         Write-SentinelError -Root $Root -Component "Watcher" -Operation "Parse Defender event XML" -Exception $_.Exception -Context @{EventId=$Event.Id;RecordId=$Event.RecordId}
-        return [pscustomobject]@{
-            EventId=[int]$Event.Id;RecordId=[long]$Event.RecordId;TimeCreated=$Event.TimeCreated
-            DetectionId="";ThreatId="";ThreatName="";SeverityName="";Path="";Resources=@()
-            ActionId="";ActionName="";ErrorCode="";ErrorDescription="";PostCleanStatus="";AdditionalActions="";RemediationUser=""
-        }
+        throw
     }
 }
 
@@ -578,9 +580,10 @@ function Save-PendingDefenderDetections {
                 Alerted=[bool]$_.Alerted
             }
         })
-        ConvertTo-Json -InputObject @($items) -Depth 8 | Set-Content -LiteralPath $pendingDefenderStatePath -Encoding UTF8 -ErrorAction Stop
+        Write-SentinelAtomicJson $pendingDefenderStatePath @($items)
     } catch {
         Write-SentinelError -Root $Root -Component "Watcher" -Operation "Save pending Defender correlation state" -Exception $_.Exception -Severity "MEDIUM"
+        throw
     }
 }
 
@@ -819,13 +822,17 @@ function Handle-DefenderEvents {
     param([ref]$LastRecordId)
     try {
         $ids=1116,1117,1118,1119,1121,1122,1123,1124,1125,1126,1127,1128,1129,5007
-        $events=Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Windows Defender/Operational';Id=$ids} -MaxEvents 300 -ErrorAction Stop |
-            Where-Object {$_.RecordId -gt $LastRecordId.Value} |
-            Sort-Object RecordId
+        $batch=Get-SentinelEventBatch -LogName 'Microsoft-Windows-Windows Defender/Operational' -Cursor $LastRecordId.Value -CursorTime $script:defenderCursorTime -Ids $ids -BatchSize ([int]$config.EventBatchSize)
+        if ($batch.Reset) {
+            if (-not (Write-SentinelJsonLine -Path $alertLog -Data ([ordered]@{Type='EventLogCursorReset';Severity='HIGH';Log='Defender';PreviousCursor=$LastRecordId.Value;Reason='Cursor anchor disappeared or changed; log cleared or overwritten.'}))) { throw 'Cannot record event-log gap.' }
+            $LastRecordId.Value=0L; $script:defenderCursorTime=''
+            Write-SentinelAtomicJson $defenderCursorPath ([ordered]@{RecordId=0L;TimeCreated=''})
+        }
+        $events=@($batch.Events)
 
         foreach ($event in $events) {
             $identity = ConvertFrom-DefenderEvent $event
-            [void](Write-SentinelJsonLine -Path (Get-DefenderLogPath $event.Id) -Data ([ordered]@{
+            $eventWritten=Write-SentinelJsonLine -Path (Get-DefenderLogPath $event.Id) -Data ([ordered]@{
                 Type="DefenderEvent"
                 EventId=$event.Id
                 RecordId=$event.RecordId
@@ -837,7 +844,8 @@ function Handle-DefenderEvents {
                 ActionName=$identity.ActionName
                 ErrorCode=$identity.ErrorCode
                 Message=$event.Message
-            }))
+            })
+            if (-not $eventWritten) { throw 'Cannot persist Defender event; cursor not advanced.' }
 
             if ($event.Id -eq 1116) {
                 $pendingDefenderDetections[[string]$event.RecordId] = [pscustomobject]@{
@@ -865,7 +873,9 @@ function Handle-DefenderEvents {
                 }
             }
 
-            if ($event.RecordId -gt $LastRecordId.Value) { $LastRecordId.Value=[long]$event.RecordId }
+            Write-SentinelAtomicJson $defenderCursorPath ([ordered]@{RecordId=[long]$event.RecordId;TimeCreated=$event.TimeCreated.ToString('o')})
+            $LastRecordId.Value=[long]$event.RecordId
+            $script:defenderCursorTime=$event.TimeCreated.ToString('o')
         }
     } catch {
         Write-SentinelError -Root $Root -Component "Watcher" -Operation "Read Defender Operational events" -Exception $_.Exception
@@ -924,7 +934,7 @@ function Check-UnresolvedDefenderDetections {
 Load-PendingDefenderDetections
 
 $startedAt = Get-Date
-Write-TextLog "SentinelLocal v1.0.0 watcher started."
+Write-TextLog "SentinelLocal v1.1.0 watcher started."
 
 try {
     Register-CimIndicationEvent -Query "SELECT * FROM Win32_ProcessStartTrace" -SourceIdentifier "SentinelLocal.ProcessStart" -ErrorAction Stop | Out-Null
@@ -941,16 +951,21 @@ $lastRetention=(Get-Date).AddHours(-13)
 $lastFirewallCleanup=(Get-Date).AddSeconds(-1 * [int]$config.FirewallCleanupSeconds)
 
 $lastDefenderRecord=0L
-if (Test-Path $lastDefenderState) {
+if (Test-Path -LiteralPath $defenderCursorPath) {
+    $savedCursor=Get-Content -LiteralPath $defenderCursorPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+    $lastDefenderRecord=[long]$savedCursor.RecordId
+    $defenderCursorTime=[string]$savedCursor.TimeCreated
+}
+if (-not (Test-Path -LiteralPath $defenderCursorPath) -and (Test-Path $lastDefenderState)) {
     try {
         $lastDefenderRecord=[long](Get-Content $lastDefenderState -Raw -ErrorAction Stop)
     } catch {
         Write-SentinelError -Root $Root -Component "Watcher" -Operation "Read Defender record cursor" -Exception $_.Exception -Severity "MEDIUM"
     }
-} else {
+} elseif (-not (Test-Path -LiteralPath $defenderCursorPath)) {
     try {
         $event=Get-WinEvent -LogName 'Microsoft-Windows-Windows Defender/Operational' -MaxEvents 1 -ErrorAction Stop
-        if ($event) { $lastDefenderRecord=[long]$event.RecordId }
+        if ($event) { $lastDefenderRecord=[long]$event.RecordId; $defenderCursorTime=$event.TimeCreated.ToString('o'); Write-SentinelAtomicJson $defenderCursorPath ([ordered]@{RecordId=$lastDefenderRecord;TimeCreated=$defenderCursorTime}) }
     } catch {
         Write-SentinelError -Root $Root -Component "Watcher" -Operation "Initialize Defender record cursor" -Exception $_.Exception
     }
@@ -966,7 +981,20 @@ while ($true) {
             $processInfo=Get-ProcessInfo $processIdValue
             if ($processInfo) {
                 $scoreResult=Get-ProcessScore $processInfo
-                if ($scoreResult.Score -ge [int]$config.ScorePolicy.DefenderCustomScan -and $processInfo.ExecutablePath) {
+                $excepted=Test-SentinelException -Path $processInfo.ExecutablePath -Config $config
+                if ($scoreResult.Score -gt 0 -and $config.ScanReferencedScripts) {
+                    foreach ($scriptTarget in @(Get-SentinelScriptTargets -ExecutablePath $processInfo.ExecutablePath -CommandLine $processInfo.CommandLine)) {
+                        if (-not (Test-SentinelException -Path $scriptTarget -Config $config)) {
+                            Queue-SentinelResponse -FilePath $scriptTarget -Score ([math]::Max($scoreResult.Score,[int]$config.ScorePolicy.DefenderCustomScan)) -Reasons (@($scoreResult.Reasons)+@('Referenced script static scan')) -Source 'ScriptArgument'
+                        }
+                    }
+                    $decodedPath=Save-SentinelDecodedCommand -Root $Root -CommandLine $processInfo.CommandLine -ExecutablePath $processInfo.ExecutablePath
+                    if ($decodedPath) { Queue-SentinelResponse -FilePath $decodedPath -Score ([math]::Max($scoreResult.Score,[int]$config.ScorePolicy.DefenderCustomScan)) -Reasons (@($scoreResult.Reasons)+@('Captured EncodedCommand static scan; never executed')) -Source 'DecodedScript' }
+                    if ($processInfo.CommandLine -match '(?i)-(enc|encodedcommand)\b|https?://') {
+                        [void](Write-SentinelJsonLine -Path $alertLog -Data ([ordered]@{Type='ScriptContentContext';Severity='MEDIUM';Process=$processInfo;DecodedPayloadPath=$decodedPath;Reason='Decodable PowerShell payloads are captured for static scanning only; invalid/unsupported encoding and remote content remain unscanned. Runtime behavior still depends on Defender AMSI.'}))
+                    }
+                }
+                if ($scoreResult.Score -ge [int]$config.ScorePolicy.DefenderCustomScan -and $processInfo.ExecutablePath -and -not $excepted) {
                     Queue-SentinelResponse -FilePath $processInfo.ExecutablePath -ProcessIdValue $processIdValue -Score $scoreResult.Score -Reasons $scoreResult.Reasons -Source "Process" -ObservedProcess $processInfo
                 } elseif ($scoreResult.Score -gt 0) {
                     [void](Write-SentinelJsonLine -Path $alertLog -Data ([ordered]@{
@@ -974,7 +1002,7 @@ while ($true) {
                     }))
                 }
 
-                if ($config.AutoKillHeuristicProcesses -and $scoreResult.Score -ge [int]$config.HeuristicKillThreshold) {
+                if ($config.AutoKillHeuristicProcesses -and $scoreResult.Score -ge [int]$config.HeuristicKillThreshold -and -not $excepted) {
                     if (Test-ProcessIdentityMatch $processInfo) {
                         try {
                             Stop-Process -Id $processIdValue -Force -ErrorAction Stop
@@ -1009,6 +1037,14 @@ while ($true) {
     }
 
     Check-UnresolvedDefenderDetections
+    if ($config.Sysmon.Enabled) {
+        try {
+            Read-SentinelSysmon -Root $Root -Config $config -ScoreProcess {param($observed) Get-ProcessScore $observed} -QueueResponse {
+                param($path,$processIdValue,$score,$observed)
+                Queue-SentinelResponse -FilePath $path -ProcessIdValue $processIdValue -Score $score.Score -Reasons $score.Reasons -Source 'Sysmon' -ObservedProcess $observed
+            }
+        } catch { Write-SentinelError -Root $Root -Component Sysmon -Operation 'Read events' -Exception $_.Exception }
+    }
 
     if (((Get-Date)-$lastPersistence).TotalSeconds -ge [int]$config.PersistencePollSeconds) {
         $newSnapshot=Get-PersistenceSnapshot

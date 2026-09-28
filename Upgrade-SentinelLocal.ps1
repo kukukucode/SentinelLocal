@@ -4,6 +4,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot 'Common.ps1')
 $sourceRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $watcherTaskName = "SentinelLocal Watcher"
 $responseWorkerTaskName = "SentinelLocal Response Worker"
@@ -13,12 +14,7 @@ if ($InstallRoot -match '"') {
     throw 'InstallRoot cannot contain a double quote character.'
 }
 
-$files = @(
-    "Common.ps1","Config.json","DefenderHealth.ps1","DefenderHardening.ps1",
-    "Restore-DefenderBackup.ps1","Response.ps1","ResponseWorker.ps1","Watcher.ps1",
-    "Check-SentinelLocal.ps1","SelfTest-SentinelLocal.ps1","Clear-SentinelFirewallRules.ps1",
-    "IntegrityMonitor.ps1","Update-SentinelIntegrityBaseline.ps1","Verify-SentinelLogs.ps1"
-)
+$files = @(Get-SentinelPackageFiles)
 
 function Merge-ConfigObject {
     param($Defaults,$Existing)
@@ -95,7 +91,7 @@ foreach ($taskName in @($watcherTaskName,$responseWorkerTaskName,$integrityTaskN
     }
 }
 
-$backupRoot = Join-Path $InstallRoot ("backups\upgrade-pre-v1.0.0-{0}" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
+$backupRoot = Join-Path $InstallRoot ("backups\upgrade-pre-v1.1.0-{0}" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
 $updateSucceeded = $false
 
 try {
@@ -120,7 +116,7 @@ try {
 
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $InstallRoot "SelfTest-SentinelLocal.ps1") -Root $InstallRoot -PreStart
     if ($LASTEXITCODE -ne 0) {
-        throw "SentinelLocal v1.0.0 pre-start SelfTest failed with exit code $LASTEXITCODE"
+        throw "SentinelLocal v1.1.0 pre-start SelfTest failed with exit code $LASTEXITCODE"
     }
 
     foreach ($taskName in @($watcherTaskName,$responseWorkerTaskName,$integrityTaskName)) {
@@ -132,11 +128,11 @@ try {
     $settings = New-ScheduledTaskSettingsSet -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 3650)
 
     Register-ScheduledTask -TaskName $watcherTaskName -Action (New-SentinelTaskAction "Watcher.ps1") -Trigger $trigger -Principal $principal -Settings $settings `
-        -Description "SentinelLocal v1.0.0: continuous monitoring and Defender event correlation." | Out-Null
+        -Description "SentinelLocal v1.1.0: continuous monitoring and Defender event correlation." | Out-Null
     Register-ScheduledTask -TaskName $responseWorkerTaskName -Action (New-SentinelTaskAction "ResponseWorker.ps1") -Trigger $trigger -Principal $principal -Settings $settings `
-        -Description "SentinelLocal v1.0.0: priority Defender scan and containment response worker." | Out-Null
+        -Description "SentinelLocal v1.1.0: priority Defender scan and containment response worker." | Out-Null
     Register-ScheduledTask -TaskName $integrityTaskName -Action (New-SentinelTaskAction "IntegrityMonitor.ps1") -Trigger $trigger -Principal $principal -Settings $settings `
-        -Description "SentinelLocal v1.0.0: self-integrity, task, and heartbeat monitoring." | Out-Null
+        -Description "SentinelLocal v1.1.0: self-integrity, task, and heartbeat monitoring." | Out-Null
 
     & (Join-Path $InstallRoot "Update-SentinelIntegrityBaseline.ps1") -Root $InstallRoot
 
@@ -174,7 +170,7 @@ finally {
     }
 }
 
-Write-Host "Upgrade to SentinelLocal v1.0.0 complete." -ForegroundColor Green
-Write-Host "Existing Config.json values were preserved; new v1.0.0 keys were added from defaults."
+Write-Host "Upgrade to SentinelLocal v1.1.0 complete." -ForegroundColor Green
+Write-Host "Existing Config.json values were preserved; new v1.1.0 keys were added from defaults."
 Write-Host "All SentinelLocal scheduled tasks pass -Root explicitly."
 Write-Host "Backup: $backupRoot"

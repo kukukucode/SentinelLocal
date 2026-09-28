@@ -1,6 +1,7 @@
 ﻿param([string]$Root = "C:\ProgramData\SentinelLocal")
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot 'Common.ps1')
 try {
     $config = Get-Content (Join-Path $Root "Config.json") -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
 } catch {
@@ -45,9 +46,7 @@ function Show-Heartbeat {
         if ($processIdValue -gt 0) { $processAlive = [bool](Get-Process -Id $processIdValue -ErrorAction SilentlyContinue) }
 
         $healthy = $age -le $StaleSeconds
-        if ($AllowBusyProcess -and [string]$heartbeat.Status -eq "Busy" -and $processAlive) {
-            $healthy = $true
-        }
+        $healthy=(Test-SentinelHeartbeat -Heartbeat $heartbeat -StaleSeconds $StaleSeconds -BusyTimeoutSeconds ([int]$config.ResponseTimeoutSeconds)).Healthy
 
         [pscustomobject]@{
             Status=$heartbeat.Status

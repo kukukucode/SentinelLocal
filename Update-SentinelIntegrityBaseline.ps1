@@ -27,7 +27,7 @@ foreach ($name in Get-SentinelCriticalFileNames) {
 }
 
 [ordered]@{
-    Version="1.0.0"
+    Version="1.1.0"
     CreatedAt=(Get-Date).ToString("o")
     Root=$Root
     Files=$entries

@@ -1,4 +1,8 @@
-﻿function Get-SentinelStringHash {
+﻿. (Join-Path $PSScriptRoot 'LogIntegrity.ps1')
+. (Join-Path $PSScriptRoot 'EventMonitoring.ps1')
+. (Join-Path $PSScriptRoot 'ResponseExecution.ps1')
+
+function Get-SentinelStringHash {
     param([Parameter(Mandatory=$true)][string]$Text)
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
@@ -26,102 +30,22 @@ function ConvertTo-SentinelOrderedMap {
 }
 
 function Write-SentinelJsonLine {
-    param(
-        [Parameter(Mandatory=$true)][string]$Path,
-        [Parameter(Mandatory=$true)]$Data
-    )
-
-    $mutex = $null
-    $hasMutex = $false
+    param([Parameter(Mandatory=$true)][string]$Path,[Parameter(Mandatory=$true)]$Data)
     try {
-        $parent = Split-Path -Parent $Path
-        if ($parent) { New-Item $parent -ItemType Directory -Force -ErrorAction Stop | Out-Null }
-
-        $payload = ConvertTo-SentinelOrderedMap $Data
-        $payload["Timestamp"] = (Get-Date).ToString("o")
-
-        # Each JSONL stream is append-only and hash-chained. This is tamper-evident,
-        # not tamper-proof against an attacker who fully controls the host.
-        $normalizedPath = [IO.Path]::GetFullPath($Path).ToLowerInvariant()
-        $mutexSuffix = (Get-SentinelStringHash $normalizedPath).Substring(0,24)
-        $mutex = New-Object System.Threading.Mutex($false, ("Global\SentinelLocalLog_" + $mutexSuffix))
-        $hasMutex = $mutex.WaitOne([TimeSpan]::FromSeconds(10))
-        if (-not $hasMutex) {
-            throw "Timed out waiting for the SentinelLocal log mutex."
-        }
-
-        $logDirectory = Split-Path -Parent $Path
-        $root = Split-Path -Parent $logDirectory
-        $chainDirectory = Join-Path $root "state\log-chain"
-        New-Item $chainDirectory -ItemType Directory -Force -ErrorAction Stop | Out-Null
-        $chainStatePath = Join-Path $chainDirectory (([IO.Path]::GetFileName($Path)) + ".state")
-
-        $previousHash = "GENESIS"
-        if (Test-Path -LiteralPath $chainStatePath) {
+        $payload=ConvertTo-SentinelOrderedMap $Data
+        $payload['Timestamp']=(Get-Date).ToString('o')
+        Add-SentinelChainedRecord -Path $Path -Payload $payload
+        if ([string]$payload['Severity'] -in @('HIGH','CRITICAL')) {
             try {
-                $chainState = Get-Content $chainStatePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-                if ($chainState.LastHash) { $previousHash = [string]$chainState.LastHash }
-            } catch {
-                $previousHash = "STATE-UNREADABLE"
-            }
-        } elseif (Test-Path -LiteralPath $Path) {
-            try {
-                $lastLine = Get-Content -LiteralPath $Path -Tail 1 -ErrorAction Stop
-                if ($lastLine) {
-                    $lastObject = $lastLine | ConvertFrom-Json -ErrorAction Stop
-                    if ($lastObject._ChainHash) { $previousHash = [string]$lastObject._ChainHash }
-                }
-            } catch {
-                $previousHash = "LOG-TAIL-UNREADABLE"
-            }
-        }
-
-        $canonical = $payload | ConvertTo-Json -Depth 14 -Compress
-        $chainHash = Get-SentinelStringHash ($previousHash + "`n" + $canonical)
-
-        $payload["_ChainAlg"] = "SHA256"
-        $payload["_ChainPrev"] = $previousHash
-        $payload["_ChainHash"] = $chainHash
-
-        $json = $payload | ConvertTo-Json -Depth 14 -Compress
-        Add-Content -LiteralPath $Path -Value $json -Encoding UTF8 -ErrorAction Stop
-
-        [ordered]@{
-            LastHash=$chainHash
-            LastUpdated=(Get-Date).ToString("o")
-            LogPath=$Path
-        } | ConvertTo-Json -Compress | Set-Content -LiteralPath $chainStatePath -Encoding UTF8 -ErrorAction Stop
-
-        # HIGH/CRITICAL events are also mirrored to the Windows Application log.
-        # A Windows Event Forwarding collector can move these off-host.
-        $severity = if ($payload.Contains("Severity")) { [string]$payload["Severity"] } else { "" }
-        if ($severity -in @("HIGH","CRITICAL")) {
-            try {
-                $entryType = if ($severity -eq "CRITICAL") { "Error" } else { "Warning" }
-                $message = $payload | ConvertTo-Json -Depth 8 -Compress
-                Write-EventLog -LogName Application -Source "SentinelLocal" -EventId 1902 -EntryType $entryType -Message $message -ErrorAction Stop
-            } catch {
-                [System.Diagnostics.Debug]::WriteLine("SentinelLocal Event Log mirror failed: " + $_.Exception.Message)
-            }
+                $type=if ($payload['Severity'] -eq 'CRITICAL') { 'Error' } else { 'Warning' }
+                Write-EventLog -LogName Application -Source SentinelLocal -EventId 1902 -EntryType $type -Message ($payload | ConvertTo-Json -Depth 8 -Compress) -ErrorAction Stop
+            } catch { [Diagnostics.Debug]::WriteLine('Event Log mirror failed: '+$_.Exception.Message) }
         }
         return $true
     } catch {
-        try {
-            Write-EventLog -LogName Application -Source "SentinelLocal" -EventId 1901 -EntryType Error `
-                -Message ("SentinelLocal logging failure: {0}`n{1}" -f $Path,$_.Exception.Message) -ErrorAction Stop
-        } catch {
-            [System.Diagnostics.Debug]::WriteLine("SentinelLocal logging failure: " + $_.Exception.Message)
-        }
+        try { Write-EventLog -LogName Application -Source SentinelLocal -EventId 1901 -EntryType Error -Message ('Logging failure: '+$Path+' '+$_.Exception.Message) -ErrorAction Stop }
+        catch { [Diagnostics.Debug]::WriteLine($_.Exception.Message) }
         return $false
-    } finally {
-        if ($mutex) {
-            if ($hasMutex) {
-                try { $mutex.ReleaseMutex() } catch {
-                    [System.Diagnostics.Debug]::WriteLine("SentinelLocal log mutex release failed: " + $_.Exception.Message)
-                }
-            }
-            $mutex.Dispose()
-        }
     }
 }
 
@@ -315,25 +239,7 @@ function Invoke-SentinelRetention {
 
         try {
             if ($ext -eq ".jsonl") {
-                $writer = [System.IO.StreamWriter]::new($tmp, $false, [System.Text.UTF8Encoding]::new($true))
-                try {
-                    foreach ($line in [System.IO.File]::ReadLines($path.FullName)) {
-                        $keep = $true
-                        try {
-                            $obj = $line | ConvertFrom-Json -ErrorAction Stop
-                            if ($obj.Timestamp) {
-                                $ts = [datetimeoffset]::Parse([string]$obj.Timestamp)
-                                $keep = $ts.LocalDateTime -ge $cutoff
-                            }
-                        } catch {
-                            $keep = $true
-                        }
-                        if ($keep) { $writer.WriteLine($line) }
-                    }
-                } finally {
-                    $writer.Dispose()
-                }
-                Move-Item $tmp $path.FullName -Force -ErrorAction Stop
+                Invoke-SentinelJsonRetention -Path $path.FullName -Cutoff $cutoff
             }
             elseif ($path.Name -eq "events.log") {
                 $writer = [System.IO.StreamWriter]::new($tmp, $false, [System.Text.UTF8Encoding]::new($true))
@@ -426,20 +332,33 @@ function Remove-ExpiredSentinelFirewallRules {
 function Get-SentinelCriticalFileNames {
     return @(
         "Common.ps1",
+        "LogIntegrity.ps1",
+        "EventMonitoring.ps1",
+        "ResponseExecution.ps1",
+        "SysmonMonitoring.ps1",
+        "Status.ps1",
         "Config.json",
-        "Watcher.ps1",
-        "ResponseWorker.ps1",
-        "Response.ps1",
-        "IntegrityMonitor.ps1",
         "DefenderHealth.ps1",
         "DefenderHardening.ps1",
         "Restore-DefenderBackup.ps1",
+        "Response.ps1",
+        "Invoke-SentinelResponse.ps1",
+        "ResponseWorker.ps1",
+        "Watcher.ps1",
+        "Check-SentinelLocal.ps1",
+        "Show-SentinelStatus.ps1",
+        "Export-SentinelAudit.ps1",
+        "Test-SentinelRemoteHealth.ps1",
+        "Add-SentinelException.ps1",
+        "SelfTest-SentinelLocal.ps1",
+        "Clear-SentinelFirewallRules.ps1",
+        "IntegrityMonitor.ps1",
+        "Update-SentinelIntegrityBaseline.ps1",
+        "Verify-SentinelLogs.ps1",
         "Install-SentinelLocal.ps1",
         "Upgrade-SentinelLocal.ps1",
-        "Uninstall-SentinelLocal.ps1",
-        "SelfTest-SentinelLocal.ps1",
-        "Check-SentinelLocal.ps1",
-        "Verify-SentinelLogs.ps1",
-        "Update-SentinelIntegrityBaseline.ps1"
+        "Uninstall-SentinelLocal.ps1"
     )
 }
+
+function Get-SentinelPackageFiles { return @(Get-SentinelCriticalFileNames) }

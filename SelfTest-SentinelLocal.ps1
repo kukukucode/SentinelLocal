@@ -3,6 +3,7 @@
     [switch]$PreStart
 )
 
+. (Join-Path $PSScriptRoot 'Common.ps1')
 $results = New-Object System.Collections.Generic.List[object]
 
 function Add-Test([string]$Name,[bool]$Passed,[string]$Detail) {
@@ -17,6 +18,11 @@ try {
 }
 
 if ($config) {
+    Add-Test 'Config: response timeouts' ([int]$config.NormalResponseTimeoutSeconds -ge 1 -and [int]$config.ResponseTimeoutSeconds -ge [int]$config.NormalResponseTimeoutSeconds) 'Normal <= High; both positive'
+    Add-Test 'Config: fresh progress interval' ([int]$config.ResponseWorkerHeartbeatSeconds -ge 1 -and [int]$config.ResponseWorkerHeartbeatSeconds -lt [int]$config.ResponseWorkerHeartbeatStaleSeconds) 'Heartbeat interval < stale threshold'
+    Add-Test 'Config: event batching' ([int]$config.EventBatchSize -ge 1 -and [int]$config.EventBatchSize -le 10000) 'Batch size within 1..10000'
+    Add-Test 'Config: retry delay' ([int]$config.ResponseRetryDelaySeconds -ge 1) 'Positive retry delay'
+    Add-Test 'Config: queue monitoring' ([int]$config.QueueWarningSeconds -ge 1 -and [int]$config.QueueWarningCount -ge 1) 'Positive backlog thresholds'
     Add-Test "Config: DefenderCorrelationWindowSeconds" ([int]$config.DefenderCorrelationWindowSeconds -gt [int]$config.UnresolvedDefenderDetectionAlertSeconds) ("Value=" + $config.DefenderCorrelationWindowSeconds)
     Add-Test "Config: ResponseQueuePollSeconds" ([int]$config.ResponseQueuePollSeconds -ge 1) ("Value=" + $config.ResponseQueuePollSeconds)
     Add-Test "Config: ResponseQueueMaxAttempts" ([int]$config.ResponseQueueMaxAttempts -ge 1) ("Value=" + $config.ResponseQueueMaxAttempts)
@@ -27,16 +33,12 @@ if ($config) {
     Add-Test "Config: FirewallRuleLifetimeMinutes" ([int]$config.FirewallRuleLifetimeMinutes -ge 1) ("Value=" + $config.FirewallRuleLifetimeMinutes)
 }
 
-$requiredFiles = @(
-    "Watcher.ps1","ResponseWorker.ps1","Response.ps1","DefenderHardening.ps1","DefenderHealth.ps1",
-    "Restore-DefenderBackup.ps1","SelfTest-SentinelLocal.ps1","Clear-SentinelFirewallRules.ps1",
-    "IntegrityMonitor.ps1","Update-SentinelIntegrityBaseline.ps1","Verify-SentinelLogs.ps1"
-)
+$requiredFiles = @(Get-SentinelPackageFiles)
 foreach ($requiredFile in $requiredFiles) {
     $requiredPath = Join-Path $Root $requiredFile
     $exists = Test-Path $requiredPath
     Add-Test ("Installed file: " + $requiredFile) $exists $requiredPath
-    if ($exists) {
+    if ($exists -and $requiredFile -like '*.ps1') {
         try {
             $tokens = $null
             $parseErrors = $null
@@ -90,7 +92,7 @@ if (-not $PreStart) {
             if ($h.ResponseWorkerProcessId) {
                 $processAlive = [bool](Get-Process -Id ([int]$h.ResponseWorkerProcessId) -ErrorAction SilentlyContinue)
             }
-            $healthy = if ([string]$h.Status -eq "Busy") { $processAlive } else { $age -le [int]$config.ResponseWorkerHeartbeatStaleSeconds }
+            $healthy=(Test-SentinelHeartbeat -Heartbeat $h -StaleSeconds ([int]$config.ResponseWorkerHeartbeatStaleSeconds) -BusyTimeoutSeconds ([int]$config.ResponseTimeoutSeconds)).Healthy
             Add-Test "Response worker heartbeat" $healthy ("Status={0}; AgeSeconds={1}; ProcessAlive={2}" -f $h.Status,[math]::Round($age,1),$processAlive)
         } catch {
             Add-Test "Response worker heartbeat" $false $_.Exception.Message

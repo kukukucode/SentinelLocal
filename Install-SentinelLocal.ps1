@@ -5,6 +5,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot 'Common.ps1')
 $sourceRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $watcherTaskName = "SentinelLocal Watcher"
 $responseWorkerTaskName = "SentinelLocal Response Worker"
@@ -14,22 +15,7 @@ if ($InstallRoot -match '"') {
     throw 'InstallRoot cannot contain a double quote character.'
 }
 
-$files = @(
-    "Common.ps1",
-    "Config.json",
-    "DefenderHealth.ps1",
-    "DefenderHardening.ps1",
-    "Restore-DefenderBackup.ps1",
-    "Response.ps1",
-    "ResponseWorker.ps1",
-    "Watcher.ps1",
-    "Check-SentinelLocal.ps1",
-    "SelfTest-SentinelLocal.ps1",
-    "Clear-SentinelFirewallRules.ps1",
-    "IntegrityMonitor.ps1",
-    "Update-SentinelIntegrityBaseline.ps1",
-    "Verify-SentinelLogs.ps1"
-)
+$files = @(Get-SentinelPackageFiles)
 
 function Merge-ConfigObject {
     param($Defaults,$Existing)
@@ -102,7 +88,7 @@ New-Item $InstallRoot -ItemType Directory -Force | Out-Null
 New-Item (Join-Path $InstallRoot "logs"),(Join-Path $InstallRoot "evidence"),(Join-Path $InstallRoot "state"),(Join-Path $InstallRoot "backups") -ItemType Directory -Force | Out-Null
 
 if (Test-Path (Join-Path $InstallRoot "Config.json")) {
-    Copy-Item (Join-Path $InstallRoot "Config.json") (Join-Path $InstallRoot ("backups\Config-before-v1.0.0-{0}.json" -f (Get-Date -Format "yyyyMMdd-HHmmss"))) -Force
+    Copy-Item (Join-Path $InstallRoot "Config.json") (Join-Path $InstallRoot ("backups\Config-before-v1.1.0-{0}.json" -f (Get-Date -Format "yyyyMMdd-HHmmss"))) -Force
 }
 
 foreach ($file in @($files | Where-Object { $_ -ne "Config.json" })) {
@@ -136,11 +122,11 @@ $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccou
 $settings = New-ScheduledTaskSettingsSet -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 3650)
 
 Register-ScheduledTask -TaskName $watcherTaskName -Action (New-SentinelTaskAction "Watcher.ps1") -Trigger $trigger -Principal $principal -Settings $settings `
-    -Description "SentinelLocal v1.0.0: continuous monitoring and Defender event correlation." | Out-Null
+    -Description "SentinelLocal v1.1.0: continuous monitoring and Defender event correlation." | Out-Null
 Register-ScheduledTask -TaskName $responseWorkerTaskName -Action (New-SentinelTaskAction "ResponseWorker.ps1") -Trigger $trigger -Principal $principal -Settings $settings `
-    -Description "SentinelLocal v1.0.0: priority Defender scan and containment response worker." | Out-Null
+    -Description "SentinelLocal v1.1.0: priority Defender scan and containment response worker." | Out-Null
 Register-ScheduledTask -TaskName $integrityTaskName -Action (New-SentinelTaskAction "IntegrityMonitor.ps1") -Trigger $trigger -Principal $principal -Settings $settings `
-    -Description "SentinelLocal v1.0.0: self-integrity, task, and heartbeat monitoring." | Out-Null
+    -Description "SentinelLocal v1.1.0: self-integrity, task, and heartbeat monitoring." | Out-Null
 
 & (Join-Path $InstallRoot "Update-SentinelIntegrityBaseline.ps1") -Root $InstallRoot
 
@@ -149,7 +135,7 @@ Start-ScheduledTask -TaskName $watcherTaskName
 Start-ScheduledTask -TaskName $integrityTaskName
 
 Write-Host ""
-Write-Host "SentinelLocal v1.0.0 installed." -ForegroundColor Green
+Write-Host "SentinelLocal v1.1.0 installed." -ForegroundColor Green
 Write-Host "Root: $InstallRoot"
 Write-Host "Tasks: $watcherTaskName / $responseWorkerTaskName / $integrityTaskName"
 if (-not $ApplyDefenderAuditProfile) {

@@ -192,15 +192,19 @@ $connections = @($connectionMap.Values)
 $scanStarted = $false
 $defenderDetected = $false
 $detections = @()
+$scanStatus='NoScanRequired'
+if ($Score -ge [int]$config.ScorePolicy.DefenderCustomScan -and -not (Test-Path -LiteralPath $FilePath -PathType Leaf)) { $scanStatus='TargetMissing' }
 
 if ($Score -ge [int]$config.ScorePolicy.DefenderCustomScan -and (Test-Path -LiteralPath $FilePath)) {
     $scanStarted = $true
     $scanStart = Get-Date
     try {
-        Start-MpScan -ScanType CustomScan -ScanPath $FilePath -ErrorAction Stop
+        if (Test-SentinelException -Path $FilePath -Config $config) { $scanStatus='Excepted'; $scanStarted=$false }
+        else { Start-MpScan -ScanType CustomScan -ScanPath $FilePath -ErrorAction Stop; $scanStatus='Completed' }
     } catch {
         Write-SentinelError -Root $Root -Component "Response" -Operation "Start Defender custom scan" -Exception $_.Exception -Context @{Path=$FilePath;Score=$Score}
         $scanStarted = $false
+        throw
     }
 
     if ($scanStarted) {
@@ -215,6 +219,7 @@ if ($Score -ge [int]$config.ScorePolicy.DefenderCustomScan -and (Test-Path -Lite
             $defenderDetected = $detections.Count -gt 0
         } catch {
             Write-SentinelError -Root $Root -Component "Response" -Operation "Read Defender scan result" -Exception $_.Exception -Context @{Path=$FilePath}
+            throw
         }
 
         if ($defenderDetected) {
@@ -298,6 +303,7 @@ if ($defenderDetected -and $config.AutoFirewallBlockOnDefenderConfirmation -and 
 
 $result = [ordered]@{
     EventId=$eventId
+    Status=$scanStatus
     RequestId=$requestId
     RequestSource=$requestSource
     RequestFile=$RequestFile
@@ -318,6 +324,7 @@ try {
     $result | ConvertTo-Json -Depth 14 | Set-Content (Join-Path $eventDirectory "response.json") -Encoding UTF8 -ErrorAction Stop
 } catch {
     Write-SentinelError -Root $Root -Component "Response" -Operation "Save evidence bundle" -Exception $_.Exception -Context @{EventId=$eventId}
+    throw
 }
-[void](Write-SentinelJsonLine -Path $alertLog -Data $result)
+if (-not (Write-SentinelJsonLine -Path $alertLog -Data $result)) { throw 'Response result could not be logged.' }
 $result

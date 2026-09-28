@@ -1,4 +1,6 @@
-﻿SentinelLocal v1.0.0（Windows専用）
+﻿v1.1の追加機能・設定手順は docs\OPERATIONS_JP.md を参照してください。
+
+SentinelLocal v1.1.0（Windows専用）
 ==================
 
 位置づけ

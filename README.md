@@ -1,4 +1,6 @@
-# SentinelLocal v1.0.0
+# SentinelLocal v1.1.0
+
+[![Windows CI](https://github.com/kukukucode/SentinelLocal/actions/workflows/windows-ci.yml/badge.svg)](https://github.com/kukukucode/SentinelLocal/actions/workflows/windows-ci.yml)
 
 **SentinelLocalはWindows専用のツールです（Windows only）。**
 Microsoft Defender、Windowsのタスクスケジューラ、イベントログ、Windows Firewallを利用します。LinuxやmacOSには対応していません。
@@ -16,6 +18,8 @@ Microsoft Defenderを主防御エンジンとして利用する、軽量Host IDS
 
 このリポジトリの初回公開版は **v1.0.0** です。提供された`SentinelLocal-v2.5.zip`を基に、設定・スクリプト・ドキュメントのバージョン表記をv1.0.0に統一しています。
 
+現在のv1.1.0では、スキャン失敗の再試行、ログ削除検知、イベントの取りこぼし対策、応答処理のタイムアウトを追加しました。Windows用の状態画面と通知、期限付き例外、監査ログの外部出力、別PCからの死活確認、任意のSysmon連携にも対応しています。設定・運用方法は[運用ガイド](docs/OPERATIONS_JP.md)を参照してください。
+
 ## 主な機能
 
 - プロセス、永続化、TCP接続、Defenderイベントの監視
@@ -25,6 +29,13 @@ Microsoft Defenderを主防御エンジンとして利用する、軽量Host IDS
 - HIGH / CRITICALイベントのWindows Application Event Logへの二重記録
 - 自身のタスク、Heartbeat、重要ファイルのハッシュの監視
 - Defenderの監査優先設定と、検出確認後の対応
+- スキャン結果の状態分離、遅延付き再試行、応答時間の上限とキュー滞留警告
+- ログの先頭・末尾・件数・バイト長のローカルチェックポイント照合
+- 古い未処理イベントからのバッチ取得と、イベントログの消去・上書き検知
+- Windowsの状態画面、利用者が有効化するデスクトップ通知
+- SHA-256と期限に結びついた例外、任意の署名者照合
+- 外部フォルダー／UNC共有への監査スナップショット出力と、WinRMによる外部死活確認
+- 任意のSysmonイベント取り込み（既定OFF）
 
 ## インストール
 
@@ -113,3 +124,13 @@ Integrity Monitorはタスクの削除・無効化・Root引数の改変、Heart
 ```
 
 詳細は[日本語説明書](README_JP.txt)と[変更履歴](CHANGELOG.txt)を参照してください。
+
+## CIと回帰テスト
+
+GitHub ActionsでWindows Server 2022 / 2025のWindows PowerShell 5.1を使用し、構文解析、パッケージの導入前チェック、回帰テストを実行します。
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
+```
+
+テストは一時フォルダーとモックを使用します。Defenderの実スキャン、インストール、OS設定変更は行いません。Windowsの実機・VMでのインストール後の検証は別途必要です。
