@@ -1,6 +1,8 @@
 ﻿param([string]$Root='C:\ProgramData\SentinelLocal',[string]$OutputPath)
 $ErrorActionPreference='Stop'
-. (Join-Path $PSScriptRoot 'Common.ps1')
+$commonPath=Join-Path $PSScriptRoot 'Common.ps1'
+if(-not (Test-Path -LiteralPath $commonPath -PathType Leaf)) { $commonPath=Join-Path (Split-Path -Parent $PSScriptRoot) 'src\Common.ps1' }
+. $commonPath
 $checks=[Collections.Generic.List[object]]::new()
 function Check([string]$Name,[scriptblock]$Probe,[scriptblock]$Judge,[string]$Recommendation) {
     try { $value=& $Probe;$checks.Add([pscustomobject]@{Name=$Name;State=$(if(& $Judge $value){'Pass'}else{'Review'});Value=$value;Recommendation=$Recommendation}) }
@@ -14,7 +16,7 @@ Check 'Secure Boot' { Confirm-SecureBootUEFI -ErrorAction Stop } {param($value) 
 Check 'Memory integrity' { @(Get-CimInstance -Namespace root\Microsoft\Windows\DeviceGuard -ClassName Win32_DeviceGuard -ErrorAction Stop).SecurityServicesRunning } {param($value) 2 -in @($value)} 'Check driver compatibility before enabling memory integrity.'
 Check 'Disk encryption' { @(Get-BitLockerVolume -ErrorAction Stop | Select-Object MountPoint,ProtectionStatus,VolumeStatus) } {param($value) @($value | Where-Object { $_.MountPoint -eq $env:SystemDrive -and [string]$_.ProtectionStatus -eq 'On' }).Count -eq 1} 'Confirm that the recovery key is backed up before enabling encryption.'
 Check 'Sentinel configuration' { $candidate=Get-Content -LiteralPath (Join-Path $Root 'Config.json') -Raw -Encoding UTF8 | ConvertFrom-Json;Assert-SentinelConfig $candidate;[string]$candidate.Version } {param($value) [bool]$value} 'Install the package and validate configuration before enabling tasks.'
-Check 'Sentinel runtime' { . (Join-Path $PSScriptRoot 'Status.ps1');Get-SentinelStatus $Root } {param($value) $value.Healthy} 'If not installed, this check is expected to require review. Installation and actual scans are separate acceptance steps.'
+Check 'Sentinel runtime' { . (Get-SentinelSourcePath (Get-SentinelSourceRoot $PSScriptRoot) 'Status.ps1');Get-SentinelStatus $Root } {param($value) $value.Healthy} 'If not installed, this check is expected to require review. Installation and actual scans are separate acceptance steps.'
 $result=[pscustomobject]@{Schema=1;ComputerName=$env:COMPUTERNAME;CapturedAt=(Get-Date).ToString('o');ReadOnly=$true;AllChecksPass=(@($checks | Where-Object { $_.State -ne 'Pass' }).Count -eq 0);Checks=@($checks)}
 if($OutputPath) { Write-SentinelAtomicJson $OutputPath $result }
 $result

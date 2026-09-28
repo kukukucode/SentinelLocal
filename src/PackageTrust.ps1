@@ -1,12 +1,12 @@
 ﻿function Get-SentinelPackagePath {
     param([string]$Root,[string]$Name)
-    if($Name -notin @(Get-SentinelPackageFiles) -and $Name -notin @('README.md','README_JP.txt','CHANGELOG.txt','docs/OPERATIONS_JP.md','docs/PILOT_JP.md')) { throw 'Unexpected package path.' }
+    if($Name -notin @(Get-SentinelPackageFiles) -and $Name -notin @('README.md','README_JP.txt','CHANGELOG.txt','docs/OPERATIONS_JP.md','docs/PILOT_JP.md','docs/REPOSITORY_JP.md')) { throw 'Unexpected package path.' }
     $base=[IO.Path]::GetFullPath($Root).TrimEnd('\')+'\'
-    $path=[IO.Path]::GetFullPath((Join-Path $base $Name))
+    $path=Get-SentinelSourcePath $Root $Name
     if(-not $path.StartsWith($base,[StringComparison]::OrdinalIgnoreCase)) { throw 'Package path escaped root.' }
     $current=Get-Item -LiteralPath $base -ErrorAction Stop
     if($current.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Package root cannot be a reparse point.' }
-    foreach($part in $Name.Split([char[]]@('\','/'))) {
+    foreach($part in $path.Substring($base.Length).Split([char[]]@('\','/'))) {
         $current=Get-Item -LiteralPath (Join-Path $current.FullName $part) -ErrorAction Stop
         if($current.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Package cannot contain reparse points.' }
     }
@@ -40,7 +40,7 @@ function Test-SentinelPackage {
         if($file.SHA256 -notmatch '^[A-Fa-f0-9]{64}$' -or (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ine $file.SHA256 -or (Get-Item -LiteralPath $path).Length -ne [long]$file.Length) { throw ('Package file verification failed: '+$file.Name) }
     }
     foreach($name in Get-SentinelPackageFiles) { if(-not $seen.ContainsKey($name)) { throw ('Manifest omitted package file: '+$name) } }
-    $config=Get-Content -LiteralPath (Join-Path $Root 'Config.json') -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+    $config=Get-Content -LiteralPath (Get-SentinelSourcePath $Root 'Config.json') -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
     Assert-SentinelConfig $config
     if($manifest.Version -ne $config.Version) { throw 'Manifest/config version mismatch.' }
     return [pscustomobject]@{Valid=$true;Signed=$signed;Version=$manifest.Version;Files=@($manifest.Files).Count;SignerThumbprint=$TrustedSignerThumbprint;FileEntries=@($manifest.Files)}

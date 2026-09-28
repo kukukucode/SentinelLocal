@@ -1,7 +1,9 @@
 ﻿param([string]$Root='C:\ProgramData\SentinelLocal',[switch]$SmokeTest)
 $ErrorActionPreference='Stop'
-. (Join-Path $PSScriptRoot 'Common.ps1')
-. (Join-Path $PSScriptRoot 'Status.ps1')
+$commonPath=Join-Path $PSScriptRoot 'Common.ps1'
+if(-not (Test-Path -LiteralPath $commonPath -PathType Leaf)) { $commonPath=Join-Path (Split-Path -Parent $PSScriptRoot) 'src\Common.ps1' }
+. $commonPath
+. (Get-SentinelSourcePath (Get-SentinelSourceRoot $PSScriptRoot) 'Status.ps1')
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [Windows.Forms.Application]::EnableVisualStyles()

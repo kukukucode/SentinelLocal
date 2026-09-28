@@ -1,6 +1,9 @@
 ﻿param([string]$Root=$PSScriptRoot,[Parameter(Mandatory=$true)][string]$OutputDirectory,[string]$CertificateThumbprint)
 $ErrorActionPreference='Stop'
-. (Join-Path $PSScriptRoot 'Common.ps1')
+$commonPath=Join-Path $PSScriptRoot 'Common.ps1'
+if(-not (Test-Path -LiteralPath $commonPath -PathType Leaf)) { $commonPath=Join-Path (Split-Path -Parent $PSScriptRoot) 'src\Common.ps1' }
+. $commonPath
+if(-not $PSBoundParameters.ContainsKey('Root')) { $Root=Get-SentinelSourceRoot $PSScriptRoot }
 if(Test-Path -LiteralPath $OutputDirectory) { throw 'Output directory already exists; refusing to overwrite a package.' }
 $base=[IO.Path]::GetFullPath($Root).TrimEnd('\')+'\'
 $output=[IO.Path]::GetFullPath($OutputDirectory).TrimEnd('\')+'\'
@@ -13,14 +16,18 @@ if($CertificateThumbprint) {
 }
 New-Item -ItemType Directory -Path $OutputDirectory | Out-Null
 $files=@()
-foreach($name in @((Get-SentinelPackageFiles)+@('README.md','README_JP.txt','CHANGELOG.txt','docs/OPERATIONS_JP.md','docs/PILOT_JP.md'))) {
+foreach($name in @((Get-SentinelPackageFiles)+@('README.md','README_JP.txt','CHANGELOG.txt','docs/OPERATIONS_JP.md','docs/PILOT_JP.md','docs/REPOSITORY_JP.md'))) {
     $source=Get-SentinelPackagePath $Root $name
     $destination=Join-Path $OutputDirectory $name
     New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
     Copy-Item -LiteralPath $source -Destination $destination
+    if($name -eq 'README.md') {
+        $readme=[IO.File]::ReadAllText($destination).Replace('(docs/README_JP.txt)','(README_JP.txt)')
+        [IO.File]::WriteAllText($destination,$readme,[Text.UTF8Encoding]::new($false))
+    }
     $files += [ordered]@{Name=$name;SHA256=(Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash;Length=(Get-Item -LiteralPath $destination).Length}
 }
-$config=Get-Content -LiteralPath (Join-Path $Root 'Config.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+$config=Get-Content -LiteralPath (Get-SentinelSourcePath $Root 'Config.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $manifestPath=Join-Path $OutputDirectory 'package.manifest.json'
 Write-SentinelAtomicJson $manifestPath ([ordered]@{Schema=1;Version=$config.Version;CreatedAt=(Get-Date).ToString('o');Files=$files})
 if($certificate) {

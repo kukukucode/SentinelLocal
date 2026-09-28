@@ -39,7 +39,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Windows package preflight
         run: |
-          & .\SelfTest-SentinelLocal.ps1 -Root $env:GITHUB_WORKSPACE -PreStart
+          & .\scripts\SelfTest-SentinelLocal.ps1 -Root $env:GITHUB_WORKSPACE -PreStart
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Verify clean diff
         run: |

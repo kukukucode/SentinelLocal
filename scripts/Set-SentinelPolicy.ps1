@@ -2,7 +2,9 @@
 [CmdletBinding(SupportsShouldProcess=$true)]
 param([Parameter(Mandatory=$true,ParameterSetName='Apply')][string]$PolicyPath,[Parameter(Mandatory=$true,ParameterSetName='Restore')][string]$RestoreBackupPath,[Parameter(Mandatory=$true)][string]$Reason,[string]$Root='C:\ProgramData\SentinelLocal',[switch]$RestartTasks)
 $ErrorActionPreference='Stop'
-. (Join-Path $PSScriptRoot 'Common.ps1')
+$commonPath=Join-Path $PSScriptRoot 'Common.ps1'
+if(-not (Test-Path -LiteralPath $commonPath -PathType Leaf)) { $commonPath=Join-Path (Split-Path -Parent $PSScriptRoot) 'src\Common.ps1' }
+. $commonPath
 $config=Get-Content -LiteralPath (Join-Path $Root 'Config.json') -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
 if($PSCmdlet.ParameterSetName -eq 'Restore') {
     $backup=Get-Content -LiteralPath $RestoreBackupPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop

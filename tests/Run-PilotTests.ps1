@@ -1,7 +1,7 @@
 ﻿param([string]$ScratchRoot=(Join-Path $env:TEMP ('SentinelLocal-pilot-'+[guid]::NewGuid().ToString('N'))),[string]$Filter='.*')
 $ErrorActionPreference='Stop'
 $packageRoot=Split-Path -Parent $PSScriptRoot
-. (Join-Path $packageRoot 'Common.ps1')
+. (Join-Path $packageRoot 'src\Common.ps1')
 if(Test-Path -LiteralPath $ScratchRoot) { throw 'Scratch directory already exists.' }
 New-Item -ItemType Directory -Path $ScratchRoot | Out-Null
 $results=[Collections.Generic.List[object]]::new()
@@ -11,10 +11,16 @@ function Test([string]$Name,[scriptblock]$Body) {
     try { & $Body;$results.Add([pscustomobject]@{Test=$Name;Passed=$true;Detail='OK'});Write-Host ('PASS '+$Name) }
     catch { $results.Add([pscustomobject]@{Test=$Name;Passed=$false;Detail=$_.Exception.Message});Write-Host ('FAIL '+$Name+': '+$_.Exception.Message) -ForegroundColor Red }
 }
-function Fixture([string]$Name,[switch]$Baseline) {
+function Fixture([string]$Name,[switch]$Baseline,[switch]$SourceLayout) {
     $directory=Join-Path $ScratchRoot $Name
     New-Item -ItemType Directory -Path $directory | Out-Null
-    foreach($file in Get-SentinelPackageFiles) { Copy-Item -LiteralPath (Join-Path $packageRoot $file) -Destination $directory }
+    foreach($file in Get-SentinelPackageFiles) {
+        $source=Get-SentinelSourcePath $packageRoot $file
+        $relative=if($SourceLayout) { $source.Substring($packageRoot.Length+1) } else { $file }
+        $destination=Join-Path $directory $relative
+        New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+        Copy-Item -LiteralPath $source -Destination $destination
+    }
     if($Baseline) {
         $files=@(foreach($file in Get-SentinelPackageFiles) { $item=Get-Item -LiteralPath (Join-Path $directory $file);[pscustomobject]@{Name=$file;SHA256=(Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash;Length=$item.Length;LastWriteTimeUtc=$item.LastWriteTimeUtc.ToString('o')} })
         Write-SentinelAtomicJson (Join-Path $directory 'state\integrity-baseline.json') ([ordered]@{Version='1.2.0';Files=$files})
@@ -23,7 +29,7 @@ function Fixture([string]$Name,[switch]$Baseline) {
 }
 function Config([string]$Root) { return Get-Content -LiteralPath (Join-Path $Root 'Config.json') -Raw -Encoding UTF8 | ConvertFrom-Json }
 function SourceFunction([string]$File,[string]$Name) {
-    $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $packageRoot $File),[ref]$tokens,[ref]$errors)
+    $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile((Get-SentinelSourcePath $packageRoot $File),[ref]$tokens,[ref]$errors)
     return [scriptblock]::Create($ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $Name},$true).Extent.Text)
 }
 function Sign-Manifest([string]$Root,$Certificate) {
@@ -42,6 +48,23 @@ function Test-Certificate {
 }
 function Write-EventLog {} # Fixtures never alter the Windows event log.
 
+Test 'Repository folders build the installed flat layout with valid documentation links' {
+    Assert ((Get-SentinelSourceRoot (Join-Path $packageRoot 'scripts')) -eq $packageRoot) 'Default package root was not resolved'
+    Assert ((Get-SentinelSourcePath $packageRoot 'Config.json') -eq (Join-Path $packageRoot 'config\Config.json')) 'Source configuration did not resolve'
+    Assert (@(Get-ChildItem -LiteralPath $packageRoot -File -Filter '*.ps1').Count -eq 0) 'Root still contains operational scripts'
+    $output=Join-Path $ScratchRoot 'layout-package'
+    & (Get-SentinelSourcePath $packageRoot 'New-SentinelPackage.ps1') -OutputDirectory $output | Out-Null
+    foreach($file in Get-SentinelPackageFiles) { Assert (Test-Path -LiteralPath (Join-Path $output $file) -PathType Leaf) ('Flat deployment file missing: '+$file) }
+    Assert (-not (Test-Path (Join-Path $output 'src')) -and -not (Test-Path (Join-Path $output 'scripts'))) 'Source folders leaked into deployed paths'
+    $verified=& (Join-Path $output 'Verify-SentinelPackage.ps1') -AllowUnsignedPackage
+    Assert $verified.Valid 'Distribution default verification root failed'
+    foreach($readmePath in @((Join-Path $packageRoot 'README.md'),(Join-Path $output 'README.md'))) {
+        foreach($match in [regex]::Matches([IO.File]::ReadAllText($readmePath),'\]\(([^)]+)\)')) {
+            $target=$match.Groups[1].Value
+            if($target -notmatch '^https?://') { Assert (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $readmePath) $target)) ('Documentation link missing: '+$target) }
+        }
+    }
+}
 Test 'Invalid policies fail before changes' {
     $root=Fixture 'config';$config=Config $root;Assert-SentinelConfig $config
     $config.PollSeconds='2';$failed=$false
@@ -190,7 +213,7 @@ Test 'Unsupported network protection is excluded from application and verificati
 }
 Test 'Unsigned packages require explicit acceptance and detect modified files' {
     $output=Join-Path $ScratchRoot 'unsigned-package'
-    & (Join-Path $packageRoot 'New-SentinelPackage.ps1') -Root $packageRoot -OutputDirectory $output | Out-Null
+    & (Get-SentinelSourcePath $packageRoot 'New-SentinelPackage.ps1') -Root $packageRoot -OutputDirectory $output | Out-Null
     $failed=$false;try { Test-SentinelPackage $output | Out-Null } catch {$failed=$true};Assert $failed 'Unsigned package implicitly trusted'
     Assert (Test-SentinelPackage $output -AllowUnsigned).Valid 'Reviewed pilot package rejected'
     Add-Content -LiteralPath (Join-Path $output 'Response.ps1') -Value '# changed'
@@ -198,7 +221,7 @@ Test 'Unsigned packages require explicit acceptance and detect modified files' {
 }
 Test 'Signed manifest requires pinned signer and rejects signature modification' {
     $output=Join-Path $ScratchRoot 'signed-package'
-    & (Join-Path $packageRoot 'New-SentinelPackage.ps1') -Root $packageRoot -OutputDirectory $output | Out-Null
+    & (Get-SentinelSourcePath $packageRoot 'New-SentinelPackage.ps1') -Root $packageRoot -OutputDirectory $output | Out-Null
     $certificate=Test-Certificate
     try {
         Sign-Manifest $output $certificate
@@ -210,7 +233,7 @@ Test 'Signed manifest requires pinned signer and rejects signature modification'
 }
 Test 'Package rejects traversal and omitted required files' {
     $output=Join-Path $ScratchRoot 'bad-package'
-    & (Join-Path $packageRoot 'New-SentinelPackage.ps1') -Root $packageRoot -OutputDirectory $output | Out-Null
+    & (Get-SentinelSourcePath $packageRoot 'New-SentinelPackage.ps1') -Root $packageRoot -OutputDirectory $output | Out-Null
     $path=Join-Path $output 'package.manifest.json';$manifest=Get-Content $path -Raw | ConvertFrom-Json
     $manifest.Files[0].Name='..\Config.json';Write-SentinelAtomicJson $path $manifest
     $failed=$false;try { Test-SentinelPackage $output -AllowUnsigned | Out-Null } catch {$failed=$true};Assert $failed 'Path traversal accepted'
@@ -219,7 +242,7 @@ Test 'Investigation report escapes log content and records integrity results' {
     $root=Fixture 'report';$path=Join-Path $root 'logs\alerts.jsonl'
     Assert (Write-SentinelJsonLine $path ([ordered]@{Type='Probe';Severity='MEDIUM';Reason='</pre><script>alert(1)</script>'})) 'Fixture log failed'
     $output=Join-Path $ScratchRoot 'report-output'
-    & (Join-Path $packageRoot 'Export-SentinelReport.ps1') -Root $root -OutputDirectory $output | Out-Null
+    & (Get-SentinelSourcePath $packageRoot 'Export-SentinelReport.ps1') -Root $root -OutputDirectory $output | Out-Null
     $html=[IO.File]::ReadAllText((Join-Path $output 'index.html'))
     Assert ($html -notmatch '<script>alert' -and $html -match '&lt;script&gt;') 'Log content could inject HTML'
     $json=Get-Content (Join-Path $output 'report.json') -Raw | ConvertFrom-Json
@@ -227,7 +250,7 @@ Test 'Investigation report escapes log content and records integrity results' {
 }
 Test 'Readiness probes do not rewrite configuration' {
     $root=Fixture 'readiness';$hash=(Get-FileHash (Join-Path $root 'Config.json')).Hash
-    $result=& (Join-Path $packageRoot 'Test-SentinelReadiness.ps1') -Root $root
+    $result=& (Get-SentinelSourcePath $packageRoot 'Test-SentinelReadiness.ps1') -Root $root
     Assert ($result.ReadOnly -and $result.Checks.Count -eq 9 -and (Get-FileHash (Join-Path $root 'Config.json')).Hash -eq $hash) 'Readiness probe changed policy'
 }
 Test 'cmd script hosts are eligible for referenced-script scanning' {
@@ -254,10 +277,10 @@ Test 'Upgrade startup failure restores old files baseline and task states' {
     Add-Content -LiteralPath (Join-Path $installed 'Common.ps1') -Value '# old reviewed implementation'
     $oldCommonHash=(Get-FileHash (Join-Path $installed 'Common.ps1')).Hash
     $oldBaselineHash=(Get-FileHash (Join-Path $installed 'state\integrity-baseline.json')).Hash
-    $source=Fixture 'upgrade-source'
-    $baselineUpdater=Join-Path $source 'Update-SentinelIntegrityBaseline.ps1'
+    $source=Fixture 'upgrade-source' -SourceLayout
+    $baselineUpdater=Get-SentinelSourcePath $source 'Update-SentinelIntegrityBaseline.ps1'
     [IO.File]::WriteAllText($baselineUpdater,[IO.File]::ReadAllText($baselineUpdater).Replace('#Requires -RunAsAdministrator',''),[Text.UTF8Encoding]::new($true))
-    $scriptPath=Join-Path $source 'Upgrade-SentinelLocal.ps1'
+    $scriptPath=Get-SentinelSourcePath $source 'Upgrade-SentinelLocal.ps1'
     $scriptText=[IO.File]::ReadAllText($scriptPath).Replace('#Requires -RunAsAdministrator','')
     $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseInput($scriptText,[ref]$tokens,[ref]$errors)
     $acl=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Set-SentinelAcl'},$true)

@@ -7,6 +7,19 @@ Microsoft Defender、Windowsのタスクスケジューラ、イベントログ�
 
 Microsoft Defenderを主防御エンジンとして利用する、軽量Host IDS / Defender補助コントローラーです。疑わしい対象をDefender Custom Scanへ渡し、Defenderの判定を優先します。独自アンチウイルス、Protected Process、カーネルEDRではありません。
 
+## リポジトリ構成
+
+| フォルダー | 内容 |
+| --- | --- |
+| src/ | 監視・応答処理と共通コード |
+| scripts/ | 導入・更新・診断・設定・状態画面の操作用スクリプト |
+| config/ | 初期設定のConfig.json |
+| docs/ | 日本語説明書と運用・開発ガイド |
+| tests/ | 回帰試験とテスト補助コード |
+| .github/ | Windows CI |
+
+ソースから使う場合はscripts/のスクリプトを実行します。New-SentinelPackage.ps1で作る配布パッケージとインストール先は従来の配置を使用します。[構成・開発ガイド](docs/REPOSITORY_JP.md)を参照してください。
+
 ## 動作環境
 
 - Windows
@@ -45,6 +58,15 @@ v1.1.0では、スキャン失敗の再試行、ログ削除検知、イベン�
 
 ダウンロードしたファイルを展開し、管理者として起動したWindows PowerShellで、そのフォルダーから実行してください。
 
+GitHubのソースリポジトリから導入する場合:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\scripts\Install-SentinelLocal.ps1 -AllowUnsignedPackage
+```
+
+作成済みの配布パッケージから導入する場合:
+
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 .\Install-SentinelLocal.ps1 -AllowUnsignedPackage
@@ -67,6 +89,14 @@ Defender設定はAuditFirstから開始し、業務への影響を確認して�
 ## 既存インストールの更新
 
 既存の設定値を保持して更新する場合は、管理者Windows PowerShellで実行してください。元パッケージの旧v2.4向けキュー移行処理も含まれています。
+
+ソースリポジトリから更新する場合:
+
+```powershell
+.\scripts\Upgrade-SentinelLocal.ps1 -AllowUnsignedPackage
+```
+
+配布パッケージから更新する場合:
 
 ```powershell
 .\Upgrade-SentinelLocal.ps1 -AllowUnsignedPackage
@@ -123,13 +153,13 @@ Integrity Monitorはタスクの削除・無効化・Root引数の改変、Heart
 管理者Windows PowerShellから実行してください。
 
 ```powershell
-.\Uninstall-SentinelLocal.ps1
+& 'C:\ProgramData\SentinelLocal\Uninstall-SentinelLocal.ps1'
 
 # データも削除する場合
-.\Uninstall-SentinelLocal.ps1 -RemoveData
+& 'C:\ProgramData\SentinelLocal\Uninstall-SentinelLocal.ps1' -RemoveData
 ```
 
-詳細は[日本語説明書](README_JP.txt)と[変更履歴](CHANGELOG.txt)を参照してください。
+詳細は[日本語説明書](docs/README_JP.txt)と[変更履歴](CHANGELOG.txt)を参照してください。
 
 ## CIと回帰テスト
 
@@ -137,6 +167,7 @@ GitHub ActionsでWindows Server 2022 / 2025のWindows PowerShell 5.1を使用し
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-PilotTests.ps1
 ```
 
 テストは一時フォルダーとモックを使用します。Defenderの実スキャン、インストール、OS設定変更は行いません。Windowsの実機・VMでのインストール後の検証は別途必要です。

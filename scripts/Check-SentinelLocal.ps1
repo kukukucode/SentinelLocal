@@ -1,7 +1,9 @@
 ﻿param([string]$Root = "C:\ProgramData\SentinelLocal")
 
 $ErrorActionPreference = "Stop"
-. (Join-Path $PSScriptRoot 'Common.ps1')
+$commonPath=Join-Path $PSScriptRoot 'Common.ps1'
+if(-not (Test-Path -LiteralPath $commonPath -PathType Leaf)) { $commonPath=Join-Path (Split-Path -Parent $PSScriptRoot) 'src\Common.ps1' }
+. $commonPath
 try {
     $config = Get-Content (Join-Path $Root "Config.json") -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
 } catch {

@@ -1,4 +1,5 @@
-﻿v1.2 single-PC pilot: docs/PILOT_JP.md
+﻿Source repository: operational scripts are under scripts/; defaults are in config/Config.json. See docs/REPOSITORY_JP.md.
+v1.2 single-PC pilot: docs/PILOT_JP.md
 Install/upgrade unsigned pilot: -AllowUnsignedPackage is now required.
 Use DefenderHardening.ps1 separately; the former installer audit-profile switch was removed.
 
@@ -104,7 +105,7 @@ Integrity Monitorは次を監視します。
 
 Defender AuditFirstも同時に設定:
 
-  .\Install-SentinelLocal.ps1 -ApplyDefenderAuditProfile
+  & 'C:\ProgramData\SentinelLocal\DefenderHardening.ps1' -Profile AuditFirst -WhatIf
 
 既存インストールから更新（旧パッケージv2.4を含む）:
 

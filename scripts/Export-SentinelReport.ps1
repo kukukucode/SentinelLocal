@@ -1,7 +1,9 @@
 ﻿param([string]$Root='C:\ProgramData\SentinelLocal',[Parameter(Mandatory=$true)][string]$OutputDirectory,[ValidateRange(10,10000)][int]$MaxEvents=1000,[string]$Search)
 $ErrorActionPreference='Stop'
-. (Join-Path $PSScriptRoot 'Common.ps1')
-. (Join-Path $PSScriptRoot 'Status.ps1')
+$commonPath=Join-Path $PSScriptRoot 'Common.ps1'
+if(-not (Test-Path -LiteralPath $commonPath -PathType Leaf)) { $commonPath=Join-Path (Split-Path -Parent $PSScriptRoot) 'src\Common.ps1' }
+. $commonPath
+. (Get-SentinelSourcePath (Get-SentinelSourceRoot $PSScriptRoot) 'Status.ps1')
 if(Test-Path -LiteralPath $OutputDirectory) { throw 'Output directory exists; refusing to overwrite a report.' }
 New-Item -ItemType Directory -Path $OutputDirectory | Out-Null
 $events=[Collections.Generic.List[object]]::new();$verification=@()

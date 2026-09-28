@@ -1,6 +1,8 @@
 ﻿param([string]$Root='C:\ProgramData\SentinelLocal',[string]$DestinationPath,[switch]$Watch)
 $ErrorActionPreference='Stop'
-. (Join-Path $PSScriptRoot 'Common.ps1')
+$commonPath=Join-Path $PSScriptRoot 'Common.ps1'
+if(-not (Test-Path -LiteralPath $commonPath -PathType Leaf)) { $commonPath=Join-Path (Split-Path -Parent $PSScriptRoot) 'src\Common.ps1' }
+. $commonPath
 function Export-Snapshot {
     param([string]$Destination)
     if (-not $Destination -or -not [IO.Path]::IsPathRooted($Destination)) { throw 'An absolute local folder or UNC destination is required.' }

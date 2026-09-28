@@ -3,7 +3,9 @@
     [switch]$PreStart
 )
 
-. (Join-Path $PSScriptRoot 'Common.ps1')
+$commonPath=Join-Path $PSScriptRoot 'Common.ps1'
+if(-not (Test-Path -LiteralPath $commonPath -PathType Leaf)) { $commonPath=Join-Path (Split-Path -Parent $PSScriptRoot) 'src\Common.ps1' }
+. $commonPath
 $results = New-Object System.Collections.Generic.List[object]
 
 function Add-Test([string]$Name,[bool]$Passed,[string]$Detail) {
@@ -11,7 +13,7 @@ function Add-Test([string]$Name,[bool]$Passed,[string]$Detail) {
 }
 
 try {
-    $config = Get-Content (Join-Path $Root "Config.json") -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $config = Get-Content (Get-SentinelSourcePath $Root 'Config.json') -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     Add-Test "Config parse" $true ("Version " + $config.Version)
 } catch {
     Add-Test "Config parse" $false $_.Exception.Message
@@ -36,7 +38,7 @@ if ($config) {
 
 $requiredFiles = @(Get-SentinelPackageFiles)
 foreach ($requiredFile in $requiredFiles) {
-    $requiredPath = Join-Path $Root $requiredFile
+    $requiredPath = Get-SentinelSourcePath $Root $requiredFile
     $exists = Test-Path $requiredPath
     Add-Test ("Installed file: " + $requiredFile) $exists $requiredPath
     if ($exists -and $requiredFile -like '*.ps1') {

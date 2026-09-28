@@ -1,7 +1,9 @@
 ﻿#Requires -RunAsAdministrator
 param([Parameter(Mandatory=$true)][string]$FilePath,[Parameter(Mandatory=$true)][string]$Reason,[Parameter(Mandatory=$true)][datetimeoffset]$ExpiresAt,[switch]$RequireSigner,[string]$Root='C:\ProgramData\SentinelLocal')
 $ErrorActionPreference='Stop'
-. (Join-Path $PSScriptRoot 'Common.ps1')
+$commonPath=Join-Path $PSScriptRoot 'Common.ps1'
+if(-not (Test-Path -LiteralPath $commonPath -PathType Leaf)) { $commonPath=Join-Path (Split-Path -Parent $PSScriptRoot) 'src\Common.ps1' }
+. $commonPath
 if (-not $Reason.Trim() -or $ExpiresAt -le [datetimeoffset]::Now) { throw 'A reason and a future expiration are required.' }
 if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf)) { throw 'Exception target must be an existing file.' }
 $configPath=Join-Path $Root 'Config.json'

@@ -1,8 +1,10 @@
 ﻿#Requires -RunAsAdministrator
 param([string]$InstallRoot='C:\ProgramData\SentinelLocal',[string]$TrustedSignerThumbprint,[switch]$AllowUnsignedPackage,[ValidateRange(5,300)][int]$StartupTimeoutSeconds=90)
 $ErrorActionPreference='Stop'
-. (Join-Path $PSScriptRoot 'Common.ps1')
-$sourceRoot=$PSScriptRoot
+$commonPath=Join-Path $PSScriptRoot 'Common.ps1'
+if(-not (Test-Path -LiteralPath $commonPath -PathType Leaf)) { $commonPath=Join-Path (Split-Path -Parent $PSScriptRoot) 'src\Common.ps1' }
+. $commonPath
+$sourceRoot=Get-SentinelSourceRoot $PSScriptRoot
 $files=@(Get-SentinelPackageFiles)
 $watcherTaskName='SentinelLocal Watcher';$responseWorkerTaskName='SentinelLocal Response Worker';$integrityTaskName='SentinelLocal Integrity Monitor'
 $taskNames=@($watcherTaskName,$responseWorkerTaskName,$integrityTaskName)
@@ -17,7 +19,7 @@ if(Test-Path -LiteralPath $InstallRoot) {
     if(@(Get-ChildItem -LiteralPath $InstallRoot -Recurse -Force -ErrorAction Stop | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count) { throw 'Installation tree contains reparse points; deployment refused.' }
 }
 foreach($file in $files) {
-    $path=Join-Path $sourceRoot $file
+    $path=Get-SentinelSourcePath $sourceRoot $file
     if(-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw ('Package file missing: '+$file) }
     if($file -like '*.ps1') {
         $tokens=$null;$errors=$null
@@ -30,11 +32,11 @@ if(Test-Path -LiteralPath (Join-Path $sourceRoot 'package.manifest.json')) {
 } elseif(-not $AllowUnsignedPackage -or $TrustedSignerThumbprint) { throw 'A verified signed package is required. Use -AllowUnsignedPackage only for a reviewed pilot source package.' }
 $verifiedHashes=@{}
 foreach($file in $files) {
-    $verifiedHashes[$file]=if($verifiedPackage) { @($verifiedPackage.FileEntries | Where-Object Name -eq $file)[0].SHA256 } else { (Get-FileHash -LiteralPath (Join-Path $sourceRoot $file) -Algorithm SHA256 -ErrorAction Stop).Hash }
+    $verifiedHashes[$file]=if($verifiedPackage) { @($verifiedPackage.FileEntries | Where-Object Name -eq $file)[0].SHA256 } else { (Get-FileHash -LiteralPath (Get-SentinelSourcePath $sourceRoot $file) -Algorithm SHA256 -ErrorAction Stop).Hash }
 }
-$packageConfig=Get-Content -LiteralPath (Join-Path $sourceRoot 'Config.json') -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+$packageConfig=Get-Content -LiteralPath (Get-SentinelSourcePath $sourceRoot 'Config.json') -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
 Assert-SentinelConfig $packageConfig
-if((Get-FileHash -LiteralPath (Join-Path $sourceRoot 'Config.json') -Algorithm SHA256).Hash -ne $verifiedHashes['Config.json']) { throw 'Package configuration changed after verification.' }
+if((Get-FileHash -LiteralPath (Get-SentinelSourcePath $sourceRoot 'Config.json') -Algorithm SHA256).Hash -ne $verifiedHashes['Config.json']) { throw 'Package configuration changed after verification.' }
 function Set-SentinelAcl {
     param([string]$Path)
     $acl=[Security.AccessControl.DirectorySecurity]::new()
@@ -74,7 +76,7 @@ New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
 foreach($directory in @('logs','state','evidence','backups')) { New-Item -ItemType Directory -Path (Join-Path $InstallRoot $directory) -Force | Out-Null }
 $mergedConfig=$packageConfig
 try {
-    foreach($file in $files) { Copy-Item -LiteralPath (Join-Path $sourceRoot $file) -Destination (Join-Path $InstallRoot $file) -Force -ErrorAction Stop }
+    foreach($file in $files) { Copy-Item -LiteralPath (Get-SentinelSourcePath $sourceRoot $file) -Destination (Join-Path $InstallRoot $file) -Force -ErrorAction Stop }
     foreach($file in $files) {
         if((Get-FileHash -LiteralPath (Join-Path $InstallRoot $file) -Algorithm SHA256).Hash -ne $verifiedHashes[$file]) { throw ('Copied package hash mismatch: '+$file) }
     }
