@@ -1,0 +1,31 @@
+﻿SentinelLocal v1.0.0
+
+INITIAL RELEASE
+- Windows向け初回公開版 v1.0.0
+- SentinelLocal-v2.5.zipを基にバージョン表記をv1.0.0へ統一
+- README.mdにWindows専用であることと導入手順を明記
+
+SELF DEFENSE
+- SentinelLocal Integrity Monitorを追加
+- Watcher/Response Worker/Integrity Monitor Taskを相互監視
+- Watcher/Response Worker heartbeat異常をHIGH/CRITICAL化
+- 重要ファイルのSHA-256 integrity baselineを追加
+- Update-SentinelIntegrityBaseline.ps1を追加
+
+LOG INTEGRITY
+- 全JSONLログをSHA-256ハッシュチェーン化
+- Verify-SentinelLogs.ps1を追加
+- HIGH/CRITICALログをWindows Application Event Logにも二重記録
+- WEF等の外部収集基盤へ転送しやすい形に変更
+
+QUEUE
+- response-queue\high / normal を追加
+- Highを常に優先処理
+- Watcher側Path dedupe
+- Response Worker側SHA-256 dedupe
+- High RiskはSHA-256 dedupeでスキップしない
+- v2.4のlegacy pending queueをnormalへ自動移行
+
+LIMITATIONS
+- Protected Process/カーネルドライバではないためAdministrators/SYSTEM/Kernel完全侵害への耐性は限定的
+- ハッシュチェーンはtamper-evidentでありoff-host保全の代替ではない

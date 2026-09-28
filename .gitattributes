@@ -1,0 +1,7 @@
+# Preserve UTF-8 BOMs in scripts and use Windows line endings on checkout.
+*.ps1 text eol=crlf
+*.json text eol=crlf
+*.txt text eol=crlf
+*.md text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf

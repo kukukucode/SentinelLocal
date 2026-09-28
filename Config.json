@@ -1,0 +1,50 @@
+﻿{
+  "Version": "1.0.0",
+  "PollSeconds": 2,
+  "PersistencePollSeconds": 15,
+  "DefenderHealthPollSeconds": 60,
+  "HeartbeatSeconds": 30,
+  "HeartbeatStaleSeconds": 120,
+  "ResponseQueuePollSeconds": 1,
+  "ResponseQueueMaxAttempts": 3,
+  "ResponseWorkerHeartbeatSeconds": 5,
+  "ResponseWorkerHeartbeatStaleSeconds": 30,
+  "DefenderRemediationGraceSeconds": 5,
+  "UnresolvedDefenderDetectionAlertSeconds": 120,
+  "DefenderCorrelationWindowSeconds": 600,
+  "NetworkWatchSeconds": 60,
+  "ScorePolicy": {
+    "LogOnlyBelow": 40,
+    "DefenderCustomScan": 40,
+    "DeepEvidence": 60,
+    "HighRisk": 80
+  },
+  "AutoContainDefenderDetections": true,
+  "AutoStopProcessWhenDefenderConfirms": true,
+  "AutoKillHeuristicProcesses": false,
+  "HeuristicKillThreshold": 95,
+  "AutoFirewallBlockOnDefenderConfirmation": false,
+  "FirewallRuleLifetimeMinutes": 60,
+  "FirewallCleanupSeconds": 60,
+  "EnablePtrLookup": true,
+  "MaxLogDays": 30,
+  "DefenderHardening": {
+    "ApplyOnInstall": false,
+    "MonitorExpectedSettings": false,
+    "ExpectedProfile": "AuditFirst",
+    "CloudBlockLevel": "High",
+    "ControlledFolderAccess": "AuditMode",
+    "ASRMode": "AuditMode"
+  },
+  "ResponseQueueHighScore": 80,
+  "ResponseQueueDedupeSeconds": 300,
+  "ResponseHashDedupeSeconds": 600,
+  "SelfDefense": {
+    "Enabled": true,
+    "PollSeconds": 15,
+    "HeartbeatSeconds": 15,
+    "HeartbeatStaleSeconds": 60,
+    "IntegrityCheck": true,
+    "AutoRestartStoppedTasks": false
+  }
+}
