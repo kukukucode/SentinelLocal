@@ -174,13 +174,13 @@ Test 'Task validates exact executable arguments principal and one boot trigger' 
 Test 'Persistence parsing expands environment and captures script DLL and shell targets inertly' {
     foreach($case in @(
         @('powershell.exe -File "C:\Users\Test User\a.ps1"','C:\Users\Test User\a.ps1'),
-        @('%TEMP%\evil.exe',(Join-Path $env:TEMP 'evil.exe')),
+        @('%TEMP%\evil.exe',[IO.Path]::GetFullPath((Join-Path $env:TEMP 'evil.exe'))),
         @('cmd /c C:\x\a.cmd','C:\x\a.cmd'),
         @('rundll32.exe "C:\Temp\evil.dll",Entry','C:\Temp\evil.dll'),
         @('wscript.exe C:\Temp\evil.vbs','C:\Temp\evil.vbs'),
         @('mshta.exe C:\Temp\evil.hta','C:\Temp\evil.hta'),
         @('C:\Program Files\Tool\app.exe --arg','C:\Program Files\Tool\app.exe'))) {
-        Assert ($case[1] -in @(Get-SentinelPersistenceTargets $case[0])) ('Static target missing: '+$case[0])
+        Assert ($case[1] -in @(Get-SentinelPersistenceTargets $case[0])) ('Static target missing: '+$case[0]+'; expected='+$case[1]+'; actual='+(@(Get-SentinelPersistenceTargets $case[0]) -join ','))
     }
     Assert (@(Get-SentinelPersistenceTargets 'https://example.invalid/a.ps1').Count -eq 0) 'Remote target interpreted as local'
     Assert (@(Get-SentinelPersistenceTargets '$(Write-Output dangerous)').Count -eq 0) 'Expression interpreted'
