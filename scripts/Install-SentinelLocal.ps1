@@ -21,7 +21,7 @@ try {
     $seen=@{}
     foreach($entry in @($stageManifest.Files)) {
         $name=[string]$entry.Name
-        if($name -notmatch '^(?:[A-Za-z0-9.-]+|docs/[A-Za-z0-9_.-]+)$' -or $name.Contains('..') -or $seen.ContainsKey($name)) {throw 'Unsafe staging file name.'}
+        if($name -notmatch '^(?:[A-Za-z0-9_.-]+|docs/[A-Za-z0-9_.-]+)$' -or $name.Contains('..') -or $seen.ContainsKey($name)) {throw 'Unsafe staging file name.'}
         $seen[$name]=$true;$path=Join-Path $PSScriptRoot $name
         $p=$path
         while($p) {

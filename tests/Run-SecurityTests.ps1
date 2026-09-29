@@ -287,6 +287,16 @@ Test 'Worker preserves an unresolved live target in failed queue instead of comp
     } finally {if(-not $child.HasExited){$child.Kill();$child.WaitForExit()};$child.Dispose()}
 }
 
+Test 'Real Scheduled Task CIM objects satisfy strict startup definition' {
+    $root=Fixture 'task-cim'
+    $arguments='-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Root "{1}"' -f (Join-Path $root 'Watcher.ps1'),$root
+    $action=New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') -Argument $arguments
+    $trigger=New-ScheduledTaskTrigger -AtStartup
+    $principal=New-ScheduledTaskPrincipal -UserId SYSTEM -LogonType ServiceAccount -RunLevel Highest
+    $task=New-ScheduledTask -Action $action -Trigger $trigger -Principal $principal
+    Assert (Test-SentinelTaskDefinition $task $root 'SentinelLocal Watcher') 'Real CIM task differed from expected definition'
+}
+
 $admin=([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if($RequireSecureStagingTests -and -not $admin) {Test 'Elevated protected staging is required by CI' {throw 'CI runner must have an elevated administrator token.'}}
 if($admin) {
@@ -297,6 +307,11 @@ if($admin) {
     Test 'Real protected staging copies verified bytes and rejects post-stage tampering' {
         $root=Package 'secure-stage';$stage=& $bootstrap -PackageRoot $root -Mode Stage -DevelopmentUnsigned -ExpectedManifestSHA256 (Get-FileHash (Join-Path $root 'package.manifest.json')).Hash -StagingRoot (Join-Path $protected 'stages')
         $acl=Get-Acl $stage.StageRoot;Assert $acl.AreAccessRulesProtected 'Stage inherited unsafe ACL'
+        $installer=[IO.File]::ReadAllText((Join-Path $stage.StageRoot 'Install-SentinelLocal.ps1'))
+        $end=$installer.IndexOf('# END BOOTSTRAP GUARD')+'# END BOOTSTRAP GUARD'.Length
+        $probe=Join-Path $stage.StageRoot 'GuardProbe.ps1'
+        [IO.File]::WriteAllText($probe,($installer.Substring(0,$end)+[Environment]::NewLine+"'StageGuardPassed'"),[Text.UTF8Encoding]::new($true))
+        Assert ((& $probe -StageReceiptPath $stage.StageReceiptPath) -eq 'StageGuardPassed') 'Valid staged package failed the real installer guard'
         $before=(Get-FileHash (Join-Path $stage.StageRoot 'Common.ps1')).Hash
         Set-Content -LiteralPath (Join-Path $root 'Common.ps1') 'source replaced after verification'
         Assert ((Get-FileHash (Join-Path $stage.StageRoot 'Common.ps1')).Hash -eq $before) 'Source replacement changed staged bytes'
@@ -304,6 +319,18 @@ if($admin) {
         Set-Content -LiteralPath (Join-Path $stage.StageRoot 'Common.ps1') ("[IO.File]::WriteAllText('"+$marker+"','bad')")
         Refused {& (Join-Path $stage.StageRoot 'Install-SentinelLocal.ps1') -StageReceiptPath $stage.StageReceiptPath} 'Changed staged payload accepted'
         Assert (-not (Test-Path $marker)) 'Changed staged code imported'
+    }
+    Test 'Bootstrap holds verified source and staging locks through child execution' {
+        $root=Package 'locked-child';$installerPath=Join-Path $root 'Install-SentinelLocal.ps1'
+        # Harmless trusted test payload: no actual deployment. Assert write refusal in the child.
+        $stub='param($InstallRoot,$StageReceiptPath,$StartupTimeoutSeconds)'+[Environment]::NewLine
+        $stub+='foreach($path in @((Join-Path $PSScriptRoot ''Common.ps1''),'''+(Join-Path $root 'Common.ps1').Replace("'","''")+''')) {$blocked=$false;try {[IO.File]::WriteAllText($path,''replacement'')} catch [IO.IOException] {$blocked=$true};if(-not $blocked){throw ''Verified file handle allowed writes during execution.''}}'
+        [IO.File]::WriteAllText($installerPath,$stub,[Text.UTF8Encoding]::new($true))
+        $manifestPath=Join-Path $root 'package.manifest.json';$m=Get-Content $manifestPath -Raw | ConvertFrom-Json
+        $entry=@($m.Files | Where-Object Name -eq 'Install-SentinelLocal.ps1')[0];$entry.SHA256=(Get-FileHash $installerPath).Hash;$entry.Length=(Get-Item $installerPath).Length
+        Write-SentinelAtomicJson $manifestPath $m
+        $r=& $bootstrap -PackageRoot $root -Mode Install -DevelopmentUnsigned -ExpectedManifestSHA256 (Get-FileHash $manifestPath).Hash -StagingRoot (Join-Path $protected 'lock-stages') -InstallRoot (Join-Path $protected 'fake-installation')
+        Assert $r.Installed 'Harmless test child failed'
     }
     Test 'Protected snapshot preserves original bytes and refuses tampering oversized or unsafe paths' {
         $root=Join-Path $protected 'snapshot';[void][IO.Directory]::CreateDirectory($root,$acl)
