@@ -19,7 +19,7 @@
     foreach($key in @('LogOnlyBelow','DefenderCustomScan','DeepEvidence','HighRisk')) { $value=$Config.ScorePolicy.$key;if(($value -isnot [int] -and $value -isnot [long]) -or $value -lt 0 -or $value -gt 1000) { throw ('Invalid score: '+$key) } }
     if($Config.ScorePolicy.DefenderCustomScan -gt $Config.ScorePolicy.DeepEvidence -or $Config.ScorePolicy.DeepEvidence -gt $Config.ScorePolicy.HighRisk) { throw 'Score thresholds must be ordered.' }
     if([int]$Config.ResponseQueueHighScore -lt [int]$Config.ScorePolicy.HighRisk) { throw 'High queue threshold must cover HighRisk.' }
-    foreach($key in @('AutoContainDefenderDetections','AutoStopProcessWhenDefenderConfirms','AutoKillHeuristicProcesses','AutoFirewallBlockOnDefenderConfirmation','ScanReferencedScripts','EnablePtrLookup')) { if($Config.$key -isnot [bool]) { throw ('Expected boolean: '+$key) } }
+    foreach($key in @('AutoContainDefenderDetections','AutoStopProcessWhenDefenderConfirms','AutoKillHeuristicProcesses','AutoFirewallBlockOnDefenderConfirmation','ScanReferencedScripts','EnablePtrLookup','AutoGlobalRemoveMpThreat','CaptureQueuedFileSnapshot')) { if($Config.$key -isnot [bool]) { throw ('Expected boolean: '+$key) } }
     foreach($pair in @(@('SelfDefense','Enabled'),@('SelfDefense','IntegrityCheck'),@('SelfDefense','AutoRestartStoppedTasks'),@('DefenderHardening','ApplyOnInstall'),@('DefenderHardening','MonitorExpectedSettings'),@('Sysmon','Enabled'),@('AuditExport','Enabled'))) {
         if($Config.($pair[0]).($pair[1]) -isnot [bool]) { throw ('Expected boolean: '+($pair -join '.')) }
     }
@@ -29,7 +29,7 @@
     if(($interval -isnot [int] -and $interval -isnot [long]) -or $interval -lt 1 -or $interval -gt 86400 -or ($Config.AuditExport.Enabled -and -not ([string]$Config.AuditExport.DestinationPath).Trim())) { throw 'Invalid audit export policy.' }
     if($Config.DefenderHardening.ExpectedProfile -notin @('AuditFirst','RecommendedBlock') -or $Config.DefenderHardening.CloudBlockLevel -notin @('Default','Moderate','High','HighPlus','ZeroTolerance') -or $Config.DefenderHardening.ControlledFolderAccess -notin @('Disabled','Enabled','AuditMode','BlockDiskModificationOnly','AuditDiskModificationOnly') -or $Config.DefenderHardening.ASRMode -notin @('Disabled','Enabled','AuditMode','Warn')) { throw 'Invalid Defender hardening policy.' }
     if(-not $Config.Resources -or -not $Config.Scheduling) { throw 'Resource and scheduling policy required.' }
-    foreach($key in @('MaxQueueCount','HighQueueReserve','MinFreeDiskMB','MaxEvidenceMB','MaxLogFileMB','StorageCheckSeconds')) {
+    foreach($key in @('MaxQueueCount','HighQueueReserve','MinFreeDiskMB','MaxEvidenceMB','MaxLogFileMB','StorageCheckSeconds','MaxSnapshotFileMB')) {
         $value=$Config.Resources.$key
         if(($value -isnot [int] -and $value -isnot [long]) -or [long]$value -lt 1 -or [long]$value -gt 1000000) { throw ('Invalid resource policy: '+$key) }
     }

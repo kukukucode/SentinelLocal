@@ -259,20 +259,6 @@ function Get-ProcessScore {
     return [pscustomobject]@{Score=$score;Reasons=@($reasons)}
 }
 
-function Get-ExecutableFromValue {
-    param([string]$Value)
-    if (-not $Value) { return $null }
-    $trimmed = $Value.Trim()
-    if ($trimmed.StartsWith('"')) {
-        $match = [regex]::Match($trimmed,'^"([^"]+)"')
-        if ($match.Success) { return $match.Groups[1].Value }
-    }
-    $match = [regex]::Match($trimmed,'^([A-Za-z]:\\.*?\.exe)(?:\s|$)','IgnoreCase')
-    if ($match.Success) { return $match.Groups[1].Value }
-    return $null
-}
-
-
 function Get-ImmediateNetworkSnapshot {
     param([int]$ProcessIdValue)
 
@@ -314,7 +300,7 @@ function Queue-SentinelResponse {
             $creation = if ($ObservedProcess -and $ObservedProcess.CreationDate) { [string]$ObservedProcess.CreationDate } else { "" }
             $processIdentityPart = "|PID=" + $ProcessIdValue + "|CREATED=" + $creation
         }
-        $contentIdentity = Get-SentinelFileIdentity $FilePath
+        $contentIdentity = if($ObservedProcess -and $ObservedProcess.ObservedSHA256 -match '^[a-fA-F0-9]{64}$'){[string]$ObservedProcess.ObservedSHA256}else{Get-SentinelFileIdentity $FilePath}
         $pathKey = Get-SentinelStringHash ("PATH|" + $normalizedPath + $processIdentityPart + "|SHA256=" + $contentIdentity)
         $now = [datetimeoffset]::Now
 
@@ -350,6 +336,9 @@ function Queue-SentinelResponse {
             @()
         }
 
+        $snapshotPath=''
+        try {$snapshotPath=Save-SentinelObservedFile -Root $Root -Path $FilePath -ObservedSHA256 $contentIdentity -RequestId $requestId -Config $config}
+        catch {Write-SentinelError -Root $Root -Component Watcher -Operation 'Capture observed file' -Exception $_.Exception -Context @{RequestId=$requestId;Path=$FilePath} -Severity HIGH}
         $request = [ordered]@{
             RequestId=$requestId
             QueuedAt=(Get-Date).ToString("o")
@@ -360,6 +349,7 @@ function Queue-SentinelResponse {
             NormalizedPath=$normalizedPath
             PathDedupeKey=$pathKey
             ObservedSHA256=$contentIdentity
+            SnapshotPath=$snapshotPath
             ProcessIdValue=$ProcessIdValue
             Score=$Score
             Reasons=@($Reasons)
@@ -505,10 +495,14 @@ function Compare-Persistence {
                     Type="Persistence";Score=$scoreResult.Score;Reasons=$scoreResult.Reasons;Item=$item
                 }))) { throw "Cannot persist suspicious persistence entry." }
                 Write-AppEvent ("Suspicious persistence: {0}`n{1}`n{2}" -f $item.Type,$item.Key,($scoreResult.Reasons -join "; "))
-                $candidate = if ($item.Type -eq "Startup") { $item.Key } else { Get-ExecutableFromValue $item.Value }
-                if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf) -and -not (Test-SentinelException -Path $candidate -Config $config)) {
-                    Queue-SentinelResponse -FilePath $candidate -Score $scoreResult.Score -Reasons $scoreResult.Reasons -Source "Persistence"
+                $candidates=if($item.Type -eq 'Startup') {@($item.Key)} else {@(Get-SentinelPersistenceTargets $item.Value)}
+                foreach($candidate in $candidates) {
+                    if(Test-Path -LiteralPath $candidate -PathType Leaf) {
+                        if(-not (Test-SentinelException -Path $candidate -Config $config)) {Queue-SentinelResponse -FilePath $candidate -Score $scoreResult.Score -Reasons $scoreResult.Reasons -Source Persistence}
+                    }
                 }
+                if(-not $candidates.Count) {[void](Write-SentinelJsonLine -Path $alertLog -Data ([ordered]@{Type='PersistenceTargetUnresolved';Severity='HIGH';Item=$item;Reason='No literal local target; manual investigation required.'}))}
+
             }
         }
     }
@@ -823,16 +817,7 @@ function Handle-DefenderOutcome {
         $matchingActiveThreats = @(Get-MatchingActiveThreats $Identity)
         if ($matchingActiveThreats.Count -gt 0) {
             try {
-                [void](Write-SentinelJsonLine -Path $alertLog -Data ([ordered]@{
-                    Type="DefenderEscalation"
-                    Severity="HIGH"
-                    DetectionId=$Identity.DetectionId
-                    ThreatId=$Identity.ThreatId
-                    ThreatName=$Identity.ThreatName
-                    Reason="A neutralizing 1117 action succeeded, but the same threat is still Active. Remove-MpThreat will process all active Defender threats."
-                    MatchingActiveThreatNames=@($matchingActiveThreats | Select-Object -ExpandProperty ThreatName)
-                }))
-                Remove-MpThreat -ErrorAction Stop
+                Invoke-SentinelGlobalThreatRemoval -Config $config -Identity $Identity -Threats $matchingActiveThreats -AlertLog $alertLog
             } catch {
                 Write-SentinelError -Root $Root -Component "Watcher" -Operation "Post-1117 active-threat escalation" -Exception $_.Exception
             }
@@ -956,7 +941,7 @@ function Check-UnresolvedDefenderDetections {
 Load-PendingDefenderDetections
 
 $startedAt = Get-Date
-Write-TextLog "SentinelLocal v1.2.0 watcher started."
+Write-TextLog "SentinelLocal v1.2.1 watcher started."
 
 try {
     Register-CimIndicationEvent -Query "SELECT * FROM Win32_ProcessStartTrace" -SourceIdentifier "SentinelLocal.ProcessStart" -ErrorAction Stop | Out-Null
@@ -1000,6 +985,8 @@ while ($true) {
     try {
         $processEvent=Wait-Event -SourceIdentifier "SentinelLocal.ProcessStart" -Timeout ([int]$config.PollSeconds)
         if ($processEvent) {
+            Invoke-SentinelVolatileObservation -Root $Root -Event $processEvent -Handler {
+            param($processEvent)
             $processIdValue=[int]$processEvent.SourceEventArgs.NewEvent.ProcessID
             $processInfo=Get-ProcessInfo $processIdValue
             if ($processInfo) {
@@ -1047,7 +1034,7 @@ while ($true) {
             if (-not $processInfo) {
                 [void](Write-SentinelJsonLine -Path $alertLog -Data ([ordered]@{Type='ProcessObservationGap';Severity='MEDIUM';ProcessId=$processIdValue;ProcessName=[string]$processEvent.SourceEventArgs.NewEvent.ProcessName;Reason='Process ended before metadata capture. Enable existing Sysmon process-create telemetry for durable metadata.'}))
             }
-            Remove-Event -EventIdentifier $processEvent.EventIdentifier -ErrorAction SilentlyContinue
+            } # Volatile event acknowledgement runs in finally.
         }
     } catch {
         Write-SentinelError -Root $Root -Component "Watcher" -Operation "Process-start event loop" -Exception $_.Exception

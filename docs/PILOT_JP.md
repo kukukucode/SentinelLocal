@@ -14,18 +14,20 @@ Windows PowerShell 5.1で実行します。確認する権限がない場合はU
 
 ## 配布パッケージの検証と導入
 
-試験版は署名なしです。SHA-256マニフェストは破損・取り違えの検出用で、ファイルとマニフェストの両方を差し替える攻撃の真正性は保証しません。
+通常は署名付きpackageと独立して信頼したBootstrap、署名者pinを使います。READMEの導入手順と[セキュリティ修正・制限](SECURITY_JP.md)を参照してください。
+
+署名なし開発版は、レビュー済みソースからflat packageを作成し、別の信頼できる経路で確認したmanifest hashを指定します。未信頼フォルダのmanifestだけから計算したhashでは改変者を認証できません。
 
 ~~~powershell
-.\Verify-SentinelPackage.ps1 -Root C:\Downloads\SentinelLocal -AllowUnsignedPackage
-# 管理者Windows PowerShell。通常の導入ではDefender設定を変えません。
-.\Install-SentinelLocal.ps1 -AllowUnsignedPackage
-.\Upgrade-SentinelLocal.ps1 -AllowUnsignedPackage
+# 信頼・レビュー済みのソースcheckoutで実行する開発者用操作
+.\scripts\New-SentinelPackage.ps1 -OutputDirectory ..\SentinelLocal-package
+# $reviewedManifestHashは独立に確認したSHA256の64桁
+& 'C:\TrustedTools\Bootstrap.ps1' -PackageRoot 'C:\Downloads\SentinelLocal-package' -Mode Verify -DevelopmentUnsigned -ExpectedManifestSHA256 $reviewedManifestHash
+# 管理者Windows PowerShellで保護stagingから導入
+& 'C:\TrustedTools\Bootstrap.ps1' -PackageRoot 'C:\Downloads\SentinelLocal-package' -Mode Install -DevelopmentUnsigned -ExpectedManifestSHA256 $reviewedManifestHash
 ~~~
 
-署名付き社内パッケージでは、別の信頼できる経路で取得した発行者の証明書の拇印40桁をTrustedSignerThumbprintに指定します。信頼済みの旧版の検証スクリプトで新しい配布フォルダーを検証してください。SHA-256のdetached CMS、コード署名用証明書、有効期間を確認します。オンライン失効確認やタイムスタンプには未対応です。初回に取得するインストーラー・検証スクリプト自体の信頼も必要です。自己検証だけで改変されたインストーラーを防ぐとは主張しません。
-
-導入前検証と起動後の新しいHeartbeatを確認します。更新失敗時はコード・設定・整合性基準・タスク定義を復元し、以前に動作していたタスクだけを再開します。バックアップのハッシュが違う場合は復元を拒否します。新規導入失敗時はタスクを除去し、調査用にファイルを残します。
+更新はMode Upgradeです。既存導入先やstaging親にreparse・危険なACLがあればBootstrapは拒否します。ACLを緩めて回避しないでください。署名検証の失効確認・タイムスタンプは未対応です。Bootstrap自体の信頼が必要です。実際のコード署名証明書を持つ配布者はBootstrapOutputPathで別出力・Authenticode署名できます。現在の開発版には製品署名は付いていません。
 
 ## 状態と調査レポート
 

@@ -30,7 +30,7 @@
         if ($child.ExitCode -ne 0) { throw ('Response child failed: ' + $stderr.Result) }
         if (-not (Test-Path -LiteralPath $resultPath)) { throw 'Response child did not produce a result.' }
         $result=Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
-        if ($result.Status -notin @('Completed','TargetMissing','NoScanRequired','Excepted')) { throw 'Response child returned an unsuccessful result.' }
+        if ($result.Status -notin @('Completed','NoScanRequired','Excepted')) { throw ('Response child returned an unsuccessful result: '+$result.Status) }
         return $result
     } finally {
         if ($hasStarted -and -not $child.HasExited) { $child.Kill(); [void]$child.WaitForExit(5000) }

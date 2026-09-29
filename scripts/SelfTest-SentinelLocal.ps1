@@ -67,9 +67,8 @@ if (-not $PreStart) {
         $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
         Add-Test ("Task: " + $taskName) ([bool]$task) $(if($task){[string]$task.State}else{"not installed"})
         if ($task) {
-            $action = @($task.Actions)[0]
-            $rootOk = ([string]$action.Arguments) -match ('(?i)-Root\s+"' + [regex]::Escape($Root) + '"')
-            Add-Test ("Task Root argument: " + $taskName) $rootOk ([string]$action.Arguments)
+            $definitionOk=Test-SentinelTaskDefinition -Task $task -Root $Root -TaskName $taskName
+            Add-Test ("Task definition: " + $taskName) $definitionOk 'Exact action, SYSTEM/Highest and startup trigger'
         }
     }
 
@@ -117,7 +116,7 @@ if (-not $PreStart) {
         Add-Test "Integrity monitor heartbeat" $false "not found"
     }
 
-    Add-Test "Integrity baseline" (Test-Path (Join-Path $Root "state\integrity-baseline.json")) (Join-Path $Root "state\integrity-baseline.json")
+    try {[void](Read-SentinelBaseline $Root);Add-Test "Integrity baseline" $true "Complete expected file set and exact paths"} catch {Add-Test "Integrity baseline" $false $_.Exception.Message}
 } else {
     Add-Test "PreStart mode" $true "Runtime task/heartbeat checks intentionally skipped"
 }

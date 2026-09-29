@@ -15,7 +15,7 @@
 
 function Assert-SentinelBaseline {
     param([string]$Root)
-    $baseline=Get-Content -LiteralPath (Join-Path $Root 'state\integrity-baseline.json') -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+    $baseline=Read-SentinelBaseline $Root
     foreach($name in Get-SentinelCriticalFileNames) {
         $entries=@($baseline.Files | Where-Object { $_.Name -eq $name })
         if($entries.Count -ne 1 -or $entries[0].SHA256 -ine (Get-FileHash -LiteralPath (Join-Path $Root $name) -Algorithm SHA256 -ErrorAction Stop).Hash) { throw ('Integrity baseline mismatch: '+$name+'. Review the change before updating policy.') }

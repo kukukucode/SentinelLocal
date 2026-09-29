@@ -20,6 +20,7 @@ try {
 
 $requestId = ""
 $requestSource = "Direct"
+$observedSHA256='';$snapshotPath=''
 $observedProcess = $null
 $initialConnections = @()
 
@@ -32,6 +33,7 @@ if ($RequestFile) {
         $ProcessIdValue = [int]$request.ProcessIdValue
         $Score = [int]$request.Score
         $Reasons = @($request.Reasons)
+        $observedSHA256=[string]$request.ObservedSHA256;$snapshotPath=[string]$request.SnapshotPath
         $observedProcess = $request.ObservedProcess
         $initialConnections = @($request.InitialConnections)
     } catch {
@@ -190,18 +192,29 @@ foreach ($connection in @($initialConnections) + @($freshConnections)) {
 }
 $connections = @($connectionMap.Values)
 
+$targetStatus=if($RequestFile){Get-SentinelTargetStatus -ObservedSHA256 $observedSHA256 -CurrentSHA256 ([string]$fileIntel.SHA256) -Exists:(Test-Path -LiteralPath $FilePath -PathType Leaf) -Observed $observedProcess -Current $currentProcessAtResponseStart -ProcessIdValue $ProcessIdValue}else{'Matched'}
+$unresolved=$targetStatus -ne 'Matched'
+$scanPath=$FilePath
+$snapshotVerified=''
+try {$snapshotVerified=Get-SentinelVerifiedSnapshot -Root $Root -Path $snapshotPath -ObservedSHA256 $observedSHA256}
+catch {Write-SentinelError -Root $Root -Component Response -Operation 'Verify snapshot' -Exception $_.Exception -Severity HIGH}
+if($snapshotVerified) {$scanPath=$snapshotVerified}
+if($unresolved -and -not $snapshotVerified) {$scanPath=''}
+if($unresolved) {
+    if(-not (Write-SentinelJsonLine -Path $alertLog -Data ([ordered]@{Type='UnresolvedTargetIdentity';Severity='HIGH';RequestId=$requestId;Status=$targetStatus;Path=$FilePath;ObservedSHA256=$observedSHA256;CurrentSHA256=$fileIntel.SHA256;Process=$processIntel;CurrentProcess=$currentProcessAtResponseStart;SnapshotPath=$snapshotVerified}))) {throw 'Cannot persist unresolved target identity.'}
+}
 $scanStarted = $false
 $defenderDetected = $false
 $detections = @()
 $scanStatus='NoScanRequired'
-if ($Score -ge [int]$config.ScorePolicy.DefenderCustomScan -and -not (Test-Path -LiteralPath $FilePath -PathType Leaf)) { $scanStatus='TargetMissing' }
+if ($Score -ge [int]$config.ScorePolicy.DefenderCustomScan -and -not (Test-Path -LiteralPath $FilePath -PathType Leaf)) { $scanStatus='TargetMissing';$unresolved=$true }
 
-if ($Score -ge [int]$config.ScorePolicy.DefenderCustomScan -and (Test-Path -LiteralPath $FilePath)) {
+if ($Score -ge [int]$config.ScorePolicy.DefenderCustomScan -and $scanPath -and (Test-Path -LiteralPath $scanPath)) {
     $scanStarted = $true
     $scanStart = Get-Date
     try {
         if (Test-SentinelException -Path $FilePath -Config $config) { $scanStatus='Excepted'; $scanStarted=$false }
-        else { Start-MpScan -ScanType CustomScan -ScanPath $FilePath -ErrorAction Stop; $scanStatus='Completed' }
+        else { Start-MpScan -ScanType CustomScan -ScanPath $scanPath -ErrorAction Stop; $scanStatus='Completed' }
     } catch {
         Write-SentinelError -Root $Root -Component "Response" -Operation "Start Defender custom scan" -Exception $_.Exception -Context @{Path=$FilePath;Score=$Score}
         $scanStarted = $false
@@ -211,7 +224,7 @@ if ($Score -ge [int]$config.ScorePolicy.DefenderCustomScan -and (Test-Path -Lite
     if ($scanStarted) {
         Start-Sleep -Seconds 1
         try {
-            $escapedPath = [regex]::Escape($FilePath)
+            $escapedPath = [regex]::Escape($scanPath)
             $detections = @(Get-MpThreatDetection -ErrorAction Stop |
                 Where-Object {
                     $_.InitialDetectionTime -ge $scanStart.AddMinutes(-2) -and
@@ -302,9 +315,25 @@ if ($defenderDetected -and $config.AutoFirewallBlockOnDefenderConfirmation -and 
     }
 }
 
+# Recheck an unprotected original after scanning. A replacement must never be
+# cached as a successful scan of the observed bytes.
+if($RequestFile -and -not $unresolved) {
+    $exists=Test-Path -LiteralPath $FilePath -PathType Leaf;$currentHash=''
+    if($exists){try {$currentHash=(Get-FileHash -LiteralPath $FilePath -Algorithm SHA256 -ErrorAction Stop).Hash} catch {}}
+    $postStatus=Get-SentinelTargetStatus -ObservedSHA256 $observedSHA256 -CurrentSHA256 $currentHash -Exists:$exists -Observed $observedProcess -Current (Get-ProcessIntel $ProcessIdValue) -ProcessIdValue $ProcessIdValue
+    if($postStatus -ne 'Matched') {$unresolved=$true;$targetStatus=$postStatus}
+}
+$snapshotScanStatus=$scanStatus
+if($unresolved) {$scanStatus=if($targetStatus -eq 'Matched'){'TargetMissing'}else{$targetStatus}}
 $result = [ordered]@{
     EventId=$eventId
     Status=$scanStatus
+    Severity=if($unresolved){'HIGH'}else{'INFO'}
+    Unresolved=$unresolved
+    ObservedSHA256=$observedSHA256
+    SnapshotPath=$snapshotVerified
+    ScanPath=$scanPath
+    SnapshotScanStatus=$snapshotScanStatus
     RequestId=$requestId
     RequestSource=$requestSource
     RequestFile=$RequestFile

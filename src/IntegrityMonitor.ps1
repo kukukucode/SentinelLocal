@@ -93,19 +93,15 @@ function Check-Tasks {
             continue
         }
 
-        $action = @($task.Actions)[0]
-        $rootOk = ([string]$action.Arguments) -match ('(?i)-Root\s+"' + [regex]::Escape($Root) + '"')
-        $fingerprint = "{0}|{1}|{2}" -f $task.State,$action.Execute,$action.Arguments
-
-        $expectedScript=if($taskName -eq 'SentinelLocal Watcher'){'Watcher.ps1'}elseif($taskName -eq 'SentinelLocal Response Worker'){'ResponseWorker.ps1'}else{'IntegrityMonitor.ps1'}
-        $scriptOk=([string]$action.Arguments) -match ('(?i)-File\s+"'+[regex]::Escape((Join-Path $Root $expectedScript))+'"')
-        $executeOk=[IO.Path]::GetFileName([string]$action.Execute) -ieq 'powershell.exe'
-        if ([string]$task.State -eq "Disabled" -or -not $rootOk -or -not $scriptOk -or -not $executeOk) {
+        $definitionOk=Test-SentinelTaskDefinition -Task $task -Root $Root -TaskName $taskName
+        $action=@($task.Actions)[0]
+        $fingerprint=Get-SentinelStringHash ($task | ConvertTo-Json -Depth 12 -Compress)
+        if ([string]$task.State -eq "Disabled" -or -not $definitionOk) {
             Alert-Once -Key ("TaskState|" + $taskName) -Fingerprint $fingerprint -Type "SentinelSelfDefense" -Severity "CRITICAL" -Fields @{
                 Component="ScheduledTask";TaskName=$taskName;State=[string]$task.State;Arguments=[string]$action.Arguments
-                Reason="SentinelLocal task was disabled or its Root argument no longer matches."
+                Reason="SentinelLocal task disabled or action, executable, arguments, principal or startup trigger differs."
             }
-            if ($config.SelfDefense.AutoRestartStoppedTasks -and [string]$task.State -eq "Disabled") {
+            if ($definitionOk -and $config.SelfDefense.AutoRestartStoppedTasks -and [string]$task.State -eq "Disabled") {
                 try { Enable-ScheduledTask -TaskName $taskName -ErrorAction Stop | Out-Null }
                 catch { Write-SentinelError -Root $Root -Component "IntegrityMonitor" -Operation "Re-enable task" -Exception $_.Exception -Context @{TaskName=$taskName} }
             }
@@ -167,7 +163,7 @@ function Check-FileIntegrity {
     }
 
     try {
-        $baseline = Get-Content $baselinePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $baseline = Read-SentinelBaseline $Root
         Clear-AlertKey "IntegrityBaseline"
 
         foreach ($entry in @($baseline.Files)) {

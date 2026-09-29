@@ -13,7 +13,7 @@ $baselinePath = Join-Path $stateDir "integrity-baseline.json"
 $entries = @()
 foreach ($name in Get-SentinelCriticalFileNames) {
     $path = Join-Path $Root $name
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw ("Critical file missing: "+$name) }
 
     $item = Get-Item -LiteralPath $path -ErrorAction Stop
     $hash = Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop
@@ -27,7 +27,7 @@ foreach ($name in Get-SentinelCriticalFileNames) {
 }
 
 Write-SentinelAtomicJson $baselinePath ([ordered]@{
-    Version="1.2.0"
+    Version="1.2.1"
     CreatedAt=(Get-Date).ToString("o")
     Root=$Root
     Files=$entries
