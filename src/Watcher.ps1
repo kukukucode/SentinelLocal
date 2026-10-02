@@ -451,7 +451,9 @@ function Get-PersistenceSnapshot {
         throw
     }
 
-    return @($items)
+    # New-Object wraps this generic list; PS 5.1's array binder can throw
+    # "Argument types do not match". Convert explicitly before enumeration.
+    return $items.ToArray()
 }
 
 function Get-PersistenceScore {
@@ -938,48 +940,56 @@ function Check-UnresolvedDefenderDetections {
     }
 }
 
-Load-PendingDefenderDetections
-
-$startedAt = Get-Date
-Write-TextLog "SentinelLocal v1.2.1 watcher started."
-
 try {
+    $startupPhase='Load pending Defender detections'
+    Load-PendingDefenderDetections
+
+    $startedAt = Get-Date
+    Write-TextLog "SentinelLocal v1.2.1 watcher started."
+
+    $startupPhase='Register process-start monitor'
     Register-CimIndicationEvent -Query "SELECT * FROM Win32_ProcessStartTrace" -SourceIdentifier "SentinelLocal.ProcessStart" -ErrorAction Stop | Out-Null
+
+    $startupPhase='Capture initial persistence snapshot'
+    $initialSnapshot=Get-PersistenceSnapshot
+    $startupPhase='Commit initial persistence comparison'
+    Update-SentinelPersistenceSnapshot -Root $Root -Current $initialSnapshot -Compare { param($old,$new) Compare-Persistence $old $new }
+    $lastPersistence=Get-Date
+    $lastHealth=(Get-Date).AddSeconds(-1 * [int]$config.DefenderHealthPollSeconds)
+    $lastHeartbeat=(Get-Date).AddSeconds(-1 * [int]$config.HeartbeatSeconds)
+    $lastRetention=(Get-Date).AddHours(-13)
+    $lastFirewallCleanup=(Get-Date).AddSeconds(-1 * [int]$config.FirewallCleanupSeconds)
+
+    $startupPhase='Initialize Defender cursor'
+    $lastDefenderRecord=0L
+    if (Test-Path -LiteralPath $defenderCursorPath) {
+        $savedCursor=Get-Content -LiteralPath $defenderCursorPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+        $lastDefenderRecord=[long]$savedCursor.RecordId
+        $defenderCursorTime=[string]$savedCursor.TimeCreated
+    }
+    if (-not (Test-Path -LiteralPath $defenderCursorPath) -and (Test-Path $lastDefenderState)) {
+        try {
+            $lastDefenderRecord=[long](Get-Content -LiteralPath $lastDefenderState -Raw -ErrorAction Stop)
+        } catch {
+            Write-SentinelError -Root $Root -Component "Watcher" -Operation "Read Defender record cursor" -Exception $_.Exception -Severity "MEDIUM"
+        }
+    } elseif (-not (Test-Path -LiteralPath $defenderCursorPath)) {
+        try {
+            $event=Get-WinEvent -LogName 'Microsoft-Windows-Windows Defender/Operational' -MaxEvents 1 -ErrorAction Stop
+            if ($event) { $lastDefenderRecord=[long]$event.RecordId; $defenderCursorTime=$event.TimeCreated.ToString('o'); Write-SentinelAtomicJson $defenderCursorPath ([ordered]@{RecordId=$lastDefenderRecord;TimeCreated=$defenderCursorTime}) }
+        } catch {
+            Write-SentinelError -Root $Root -Component "Watcher" -Operation "Initialize Defender record cursor" -Exception $_.Exception
+        }
+    }
+
+    $startupPhase='Write initial heartbeat'
+    Write-Heartbeat -LastDefenderRecordId $lastDefenderRecord -StartedAt $startedAt
 } catch {
-    Write-SentinelError -Root $Root -Component "Watcher" -Operation "Register process-start monitor" -Exception $_.Exception
+    Write-SentinelError -Root $Root -Component 'Watcher' -Operation 'Initialize monitoring' -Exception $_.Exception -Context @{
+        Phase=$startupPhase;ErrorId=$_.FullyQualifiedErrorId;ScriptStackTrace=$_.ScriptStackTrace
+    }
     throw
 }
-
-$initialSnapshot=Get-PersistenceSnapshot
-Update-SentinelPersistenceSnapshot -Root $Root -Current $initialSnapshot -Compare { param($old,$new) Compare-Persistence $old $new }
-$lastPersistence=Get-Date
-$lastHealth=(Get-Date).AddSeconds(-1 * [int]$config.DefenderHealthPollSeconds)
-$lastHeartbeat=(Get-Date).AddSeconds(-1 * [int]$config.HeartbeatSeconds)
-$lastRetention=(Get-Date).AddHours(-13)
-$lastFirewallCleanup=(Get-Date).AddSeconds(-1 * [int]$config.FirewallCleanupSeconds)
-
-$lastDefenderRecord=0L
-if (Test-Path -LiteralPath $defenderCursorPath) {
-    $savedCursor=Get-Content -LiteralPath $defenderCursorPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
-    $lastDefenderRecord=[long]$savedCursor.RecordId
-    $defenderCursorTime=[string]$savedCursor.TimeCreated
-}
-if (-not (Test-Path -LiteralPath $defenderCursorPath) -and (Test-Path $lastDefenderState)) {
-    try {
-        $lastDefenderRecord=[long](Get-Content $lastDefenderState -Raw -ErrorAction Stop)
-    } catch {
-        Write-SentinelError -Root $Root -Component "Watcher" -Operation "Read Defender record cursor" -Exception $_.Exception -Severity "MEDIUM"
-    }
-} elseif (-not (Test-Path -LiteralPath $defenderCursorPath)) {
-    try {
-        $event=Get-WinEvent -LogName 'Microsoft-Windows-Windows Defender/Operational' -MaxEvents 1 -ErrorAction Stop
-        if ($event) { $lastDefenderRecord=[long]$event.RecordId; $defenderCursorTime=$event.TimeCreated.ToString('o'); Write-SentinelAtomicJson $defenderCursorPath ([ordered]@{RecordId=$lastDefenderRecord;TimeCreated=$defenderCursorTime}) }
-    } catch {
-        Write-SentinelError -Root $Root -Component "Watcher" -Operation "Initialize Defender record cursor" -Exception $_.Exception
-    }
-}
-
-Write-Heartbeat -LastDefenderRecordId $lastDefenderRecord -StartedAt $startedAt
 
 while ($true) {
     try {

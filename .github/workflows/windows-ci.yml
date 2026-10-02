@@ -49,6 +49,10 @@ jobs:
         run: |
           & .\tests\Run-EvaluationTests.ps1 -ScratchRoot (Join-Path $env:RUNNER_TEMP 'SentinelLocal-evaluation-tests')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Watcher startup regressions (mocked telemetry, no installation)
+        run: |
+          & .\tests\Run-WatcherStartupTests.ps1 -ScratchRoot (Join-Path $env:RUNNER_TEMP 'SentinelLocal-watcher-startup-tests')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Evaluation readiness tests (read-only probes and fixtures)
         run: |
           & .\tests\Run-EvaluationReadinessTests.ps1 -ScratchRoot (Join-Path $env:RUNNER_TEMP 'SentinelLocal-evaluation-readiness-tests')
@@ -68,5 +72,6 @@ jobs:
             ${{ runner.temp }}/SentinelLocal-security-tests/test-results.json
             ${{ runner.temp }}/SentinelLocal-evaluation-tests/test-results.json
             ${{ runner.temp }}/SentinelLocal-evaluation-readiness-tests/test-results.json
+            ${{ runner.temp }}/SentinelLocal-watcher-startup-tests/test-results.json
           if-no-files-found: warn
           retention-days: 14
