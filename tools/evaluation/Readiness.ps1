@@ -5,6 +5,9 @@ $evaluationRepo=Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 function Get-EvaluationRuntimeProcess([int]$ProcessIdValue) {
     return Get-CimInstance Win32_Process -Filter ("ProcessId="+$ProcessIdValue) -ErrorAction Stop
 }
+function Get-EvaluationCurrentTime {
+    return [datetimeoffset]::Now
+}
 function Get-EvaluationRuntimeTask([string]$Name) {
     return Get-ScheduledTask -TaskName $Name -TaskPath '\' -ErrorAction Stop
 }
@@ -45,7 +48,9 @@ function Get-EvaluationLogAccess([string]$Root) {
     return $streams
 }
 
-function Get-SentinelEvaluationReadiness([string]$Root='C:\ProgramData\SentinelLocal',[datetimeoffset]$Now=[datetimeoffset]::Now) {
+function Get-SentinelEvaluationReadiness([string]$Root='C:\ProgramData\SentinelLocal',[datetimeoffset]$Now) {
+    $fixedTime=$PSBoundParameters.ContainsKey('Now')
+    if(-not $fixedTime) { $Now=Get-EvaluationCurrentTime }
     $rootPath=[IO.Path]::GetFullPath($Root).TrimEnd('\')
     $checks=[Collections.Generic.List[object]]::new()
     function Probe([string]$Name,[scriptblock]$Read,[scriptblock]$Judge,[string]$NextStep) {
@@ -88,11 +93,17 @@ function Get-SentinelEvaluationReadiness([string]$Root='C:\ProgramData\SentinelL
             if(-not $config) { throw 'Configuration could not be verified.' }
             $heartbeat=Get-Content -LiteralPath (Join-Path $rootPath ('state\'+$component.File)) -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
             if([string]$heartbeat.Version -cne [string]$config.Version) { throw 'Heartbeat version differs from configuration.' }
-            if([string]$heartbeat.Status -cnotin $component.Statuses) { throw 'Component is stopped, busy or in an unsupported state; wait for a healthy idle baseline.' }
+            if([string]$heartbeat.Status -cnotin $component.Statuses) { throw ('Component status is "'+[string]$heartbeat.Status+'"; expected '+($component.Statuses -join ', ')+'. Wait for a healthy measurement baseline.') }
             if([string]$heartbeat.LastUpdated -notmatch '(Z|[+-]\d{2}:\d{2})$') { throw 'Heartbeat needs an explicit timezone.' }
             $updated=[datetimeoffset]::Parse([string]$heartbeat.LastUpdated,[Globalization.CultureInfo]::InvariantCulture)
-            $age=($Now-$updated).TotalSeconds
-            if($age -lt -5 -or $age -gt [int]$component.Stale) { throw 'Heartbeat is stale or unexpectedly in the future.' }
+            # Live probes may take seconds and heartbeats continue updating.
+            # Compare with the clock at this read, not the report start time.
+            # An explicitly supplied Now is retained for deterministic tests.
+            $checkedAt=if($fixedTime) { $Now } else { Get-EvaluationCurrentTime }
+            $age=($checkedAt-$updated).TotalSeconds
+            if($age -lt -5 -or $age -gt [int]$component.Stale) {
+                throw ('Heartbeat is stale or unexpectedly in the future. LastUpdated={0}; CheckedAt={1}; AgeSeconds={2:F3}; StaleSeconds={3}.' -f $updated.ToString('o'),$checkedAt.ToString('o'),$age,$component.Stale)
+            }
             $pidValue=$heartbeat.($component.PidField)
             if(($pidValue -isnot [int] -and $pidValue -isnot [long]) -or $pidValue -le 0) { throw 'Invalid heartbeat process ID.' }
             $process=Get-EvaluationRuntimeProcess $pidValue
@@ -103,7 +114,7 @@ function Get-SentinelEvaluationReadiness([string]$Root='C:\ProgramData\SentinelL
             if(-not $process.CreationDate) { throw 'Process creation time is unavailable.' }
             $created=[datetimeoffset]([datetime]$process.CreationDate).ToUniversalTime()
             if($created -gt $updated) { throw 'Process was created after its heartbeat; possible PID reuse.' }
-            [pscustomobject]@{ProcessId=$pidValue;ProcessCreatedAt=$created.ToString('o');AgeSeconds=[math]::Round($age,3);Status=[string]$heartbeat.Status;LastUpdated=[string]$heartbeat.LastUpdated}
+            [pscustomobject]@{ProcessId=$pidValue;ProcessCreatedAt=$created.ToString('o');AgeSeconds=[math]::Round($age,3);Status=[string]$heartbeat.Status;LastUpdated=[string]$heartbeat.LastUpdated;CheckedAt=$checkedAt.ToString('o')}
         } {param($value) $true} 'Check the installed task, process and fresh heartbeat; a heartbeat file alone is insufficient.'
         Probe ($component.Name+' task') {
             $task=Get-EvaluationRuntimeTask $component.Task

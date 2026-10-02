@@ -15,7 +15,14 @@ function Get-EvaluationRuntimeProcess([int]$ProcessIdValue) {
     if($script:ProcessError) { throw 'Process access denied (fixture)' }
     return $script:Processes[$ProcessIdValue]
 }
-function Get-EvaluationRuntimeTask([string]$Name) { return $script:Tasks[$Name] }
+function Get-EvaluationCurrentTime { return $script:ClockTime }
+function Get-EvaluationRuntimeTask([string]$Name) {
+    if($script:AdvanceProbeClock -and $Name -eq 'SentinelLocal Watcher') {
+        $script:ClockTime=$script:ClockTime.AddSeconds(20)
+        $script:AdvanceProbeClock=$false
+    }
+    return $script:Tasks[$Name]
+}
 function Get-EvaluationDefenderState { return $script:Defender }
 function Get-EvaluationEventChannel([string]$Name) {
     if($script:ChannelError -or ($script:SysmonError -and $Name -like '*Sysmon*')) { throw 'Event channel access denied (fixture)' }
@@ -28,6 +35,7 @@ function Fixture([string]$Name) {
     Copy-Item -LiteralPath (Join-Path $repo 'config\Config.json') -Destination (Join-Path $root 'Config.json')
     foreach($file in @('Common.ps1','Watcher.ps1','ResponseWorker.ps1','IntegrityMonitor.ps1')) { Set-Content -LiteralPath (Join-Path $root $file) -Value "throw 'Installed payload must not execute during a read-only preflight.'" -Encoding UTF8 }
     $script:Processes=@{};$script:Tasks=@{};$script:ProcessError=$false;$script:ChannelError=$false;$script:SysmonError=$false
+    $script:ClockTime=$now;$script:AdvanceProbeClock=$false
     $script:Channels=[Collections.Generic.List[string]]::new()
     $script:Defender=[pscustomobject]@{Mode='Normal';Antivirus=$true;RealTime=$true;Behavior=$true;EngineVersion='Fixture';SignatureVersion='Fixture'}
     $components=@(
@@ -96,6 +104,34 @@ Run-Test 'Stale, future and stopped heartbeat states do not pass' {
     Set-Heartbeat $root LastUpdated ($now.ToString('o'));Set-Heartbeat $root Status 'Stopped'
     Assert (-not (Get-SentinelEvaluationReadiness $root $now).ReadyForBenignTrials) 'Stopped heartbeat accepted'
 }
+Run-Test 'Live probes use each read time when heartbeats update after report start' {
+    $root=Fixture 'advancing-clock'
+    foreach($name in @('response-worker-heartbeat.json','integrity-monitor-heartbeat.json')) {
+        $path=Join-Path $root ('state\'+$name)
+        $heartbeat=Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $heartbeat.LastUpdated=$now.AddSeconds(15).ToString('o')
+        Write-SentinelAtomicJson $path $heartbeat
+    }
+    $before=Snapshot $root;$script:AdvanceProbeClock=$true
+    $report=Get-SentinelEvaluationReadiness -Root $root
+    Assert $report.ReadyForBenignTrials 'A heartbeat refreshed during a slow probe was mistaken for future data.'
+    Assert ($report.CapturedAt -eq $now.ToString('o')) 'Report start time changed.'
+    $check=$report.Checks | Where-Object Name -eq 'IntegrityMonitor heartbeat/process'
+    Assert ($check.Value.AgeSeconds -eq 5 -and $check.Value.CheckedAt -eq $now.AddSeconds(20).ToString('o')) 'Heartbeat did not use its own check time.'
+    Assert ((Snapshot $root) -eq $before) 'Clock handling mutated the installation.'
+    $frozen=Get-SentinelEvaluationReadiness -Root $root -Now $now
+    Assert (-not $frozen.ReadyForBenignTrials) 'Explicit test time was ignored.'
+}
+Run-Test 'Live probes continue to reject genuinely future and stale timestamps with evidence' {
+    $root=Fixture 'live-invalid-time';Set-Heartbeat $root LastUpdated ($now.AddSeconds(10).ToString('o'))
+    $report=Get-SentinelEvaluationReadiness -Root $root
+    $check=$report.Checks | Where-Object Name -eq 'Watcher heartbeat/process'
+    Assert (-not $report.ReadyForBenignTrials -and $check.Value -like '*AgeSeconds=-10.000*' -and $check.Value -like '*CheckedAt=*') 'A genuinely future heartbeat passed or lacked timing evidence.'
+    Set-Heartbeat $root LastUpdated ($now.AddMinutes(-10).ToString('o'))
+    $report=Get-SentinelEvaluationReadiness -Root $root
+    $check=$report.Checks | Where-Object Name -eq 'Watcher heartbeat/process'
+    Assert (-not $report.ReadyForBenignTrials -and $check.Value -like '*AgeSeconds=600.000*') 'A stale heartbeat passed.'
+}
 Run-Test 'Heartbeat version and timestamp must match the measurement configuration' {
     $root=Fixture 'version';Set-Heartbeat $root Version '0.0.0'
     Assert (-not (Get-SentinelEvaluationReadiness $root $now).ReadyForBenignTrials) 'Wrong-version heartbeat accepted'
@@ -122,7 +158,10 @@ Run-Test 'Disabled or modified tasks and a busy worker require a clean baseline'
     Assert (-not (Get-SentinelEvaluationReadiness $root $now).ReadyForBenignTrials) 'Modified task accepted'
     $root=Fixture 'busy';$path=Join-Path $root 'state\response-worker-heartbeat.json'
     $heartbeat=Get-Content $path -Raw | ConvertFrom-Json;$heartbeat.Status='Busy';Write-SentinelAtomicJson $path $heartbeat
-    Assert (-not (Get-SentinelEvaluationReadiness $root $now).ReadyForBenignTrials) 'Busy worker accepted as baseline'
+    $report=Get-SentinelEvaluationReadiness $root $now
+    Assert (-not $report.ReadyForBenignTrials) 'Busy worker accepted as baseline'
+    $check=$report.Checks | Where-Object Name -eq 'ResponseWorker heartbeat/process'
+    Assert ($check.Value -like '*status is "Busy"*') 'Busy status was not identified in diagnostics.'
 }
 Run-Test 'Access errors remain unverified instead of clean results' {
     $root=Fixture 'access';$script:ProcessError=$true;$script:ChannelError=$true
@@ -157,6 +196,7 @@ Run-Test 'CLI writes an unready report outside the installation and returns exit
     $output=Join-Path $ScratchRoot 'cli-report';$missing=Join-Path $ScratchRoot 'cli-not-installed'
     $invocation=Invoke-ReadinessCli $missing $output
     Assert ($invocation.ExitCode -eq 2) ('Unready CLI returned a successful measurement status: '+$invocation.Error)
+    Assert ($invocation.Output -match 'Checks requiring attention:' -and $invocation.Output -match 'Value\s*:') 'CLI concealed the reason for an unready check.'
     $report=Get-Content (Join-Path $output 'readiness.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     Assert (-not $report.ReadyForBenignTrials -and -not $report.PerformanceMeasured -and -not (Test-Path $missing)) 'CLI invented results or modified the monitored root'
     $invocation=Invoke-ReadinessCli $missing $output

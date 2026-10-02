@@ -1,4 +1,5 @@
 Unreleased - evaluation foundation (2026-10-03)
+- Measurement preflight compares each heartbeat with its read time, avoiding false future-timestamp failures during slow probes; diagnostics include actual status and timing evidence.
 - Fix PowerShell 5.1 Watcher startup failure when converting a New-Object generic persistence list; retain startup-phase error diagnostics.
 - Offline per-source trial rates, first-alert latency and scoped ATT&CK emulation coverage reports.
 - Explicit synthetic examples, unmeasured values, error exclusions and auditable input records.

@@ -21,6 +21,10 @@ $report=Get-SentinelEvaluationReadiness -Root $rootPath
 [void](New-Item -ItemType Directory -Path $outputPath -ErrorAction Stop)
 [IO.File]::WriteAllText((Join-Path $outputPath 'readiness.json'),($report | ConvertTo-Json -Depth 20),[Text.UTF8Encoding]::new($false))
 $report.Checks | Select-Object Name,State,NextStep | Format-Table -AutoSize
+if(-not $report.ReadyForBenignTrials) {
+    Write-Host 'Checks requiring attention:'
+    $report.Checks | Where-Object { $_.State -ne 'Pass' } | Select-Object Name,State,Value | Format-List
+}
 Write-Host ('Readiness report: '+(Join-Path $outputPath 'readiness.json'))
 Write-Host ('Ready for benign trials: '+$report.ReadyForBenignTrials+'. No performance measurements were made.')
 if(-not $report.ReadyForBenignTrials) { exit 2 }
