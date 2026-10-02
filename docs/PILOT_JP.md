@@ -18,14 +18,33 @@ Windows PowerShell 5.1で実行します。確認する権限がない場合はU
 
 署名なし開発版は、レビュー済みソースからflat packageを作成し、別の信頼できる経路で確認したmanifest hashを指定します。未信頼フォルダのmanifestだけから計算したhashでは改変者を認証できません。
 
+次の準備は、信頼・レビュー済みのソースcheckoutのルートで実行します。scripts/、bootstrap/、config/があるフォルダーです。ソースZIPを展開した場合は、そのフォルダーへ移動してください。古い配布ZIPのルートにはscripts/がない場合があります。
+
 ~~~powershell
-# 信頼・レビュー済みのソースcheckoutで実行する開発者用操作
-.\scripts\New-SentinelPackage.ps1 -OutputDirectory ..\SentinelLocal-package
-# $reviewedManifestHashは独立に確認したSHA256の64桁
-& 'C:\TrustedTools\Bootstrap.ps1' -PackageRoot 'C:\Downloads\SentinelLocal-package' -Mode Verify -DevelopmentUnsigned -ExpectedManifestSHA256 $reviewedManifestHash
-# 管理者Windows PowerShellで保護stagingから導入
-& 'C:\TrustedTools\Bootstrap.ps1' -PackageRoot 'C:\Downloads\SentinelLocal-package' -Mode Install -DevelopmentUnsigned -ExpectedManifestSHA256 $reviewedManifestHash
+$ErrorActionPreference = 'Stop'
+$repoRoot = (Get-Location).Path
+if (-not (Test-Path -LiteralPath (Join-Path $repoRoot 'scripts\New-SentinelPackage.ps1'))) {
+    throw 'scripts\New-SentinelPackage.ps1があるソースリポジトリのルートへ移動してください。'
+}
+$prepRoot = Join-Path (Split-Path -Parent $repoRoot) ('SentinelLocal-dev-' + [guid]::NewGuid().ToString('N'))
+$packageRoot = Join-Path $prepRoot 'package'
+$bootstrapPath = Join-Path $prepRoot 'Bootstrap.ps1'
+& (Join-Path $repoRoot 'scripts\New-SentinelPackage.ps1') -Root $repoRoot -OutputDirectory $packageRoot -BootstrapOutputPath $bootstrapPath
+# このハッシュは、上で信頼・レビュー済みソースから自分で作ったpackageのものです。
+$reviewedManifestHash = (Get-FileHash -LiteralPath (Join-Path $packageRoot 'package.manifest.json') -Algorithm SHA256).Hash
+& $bootstrapPath -PackageRoot $packageRoot -Mode Verify -DevelopmentUnsigned -ExpectedManifestSHA256 $reviewedManifestHash
+[pscustomobject]@{PackageRoot=$packageRoot;BootstrapPath=$bootstrapPath;ManifestSHA256=$reviewedManifestHash}
 ~~~
+
+ここまででpackageと別ファイルのBootstrapを用意し、Verifyを行います。BootstrapOutputPathを指定せずに作成した場合、Bootstrapは自動では出力されません。READMEのC:\TrustedToolsやC:\Downloadsは例示で、自動作成されるフォルダーではありません。
+
+導入は管理者Windows PowerShellで行います。別のPowerShellを開いた場合、上で表示した3つの実際の値をpackageRoot、bootstrapPath、reviewedManifestHashへ設定し直してください。信頼してレビューしたBootstrapを使用し、その後に次の操作で保護stagingから導入します。
+
+~~~powershell
+& $bootstrapPath -PackageRoot $packageRoot -Mode Install -DevelopmentUnsigned -ExpectedManifestSHA256 $reviewedManifestHash
+~~~
+
+この手順は自分でレビューしたソースから作成する開発者向けの方法です。ダウンロードした未信頼のpackageからハッシュを計算するだけでは、配布者の真正性を確認できません。レビューしたBootstrap自体の信頼も必要です。
 
 更新はMode Upgradeです。既存導入先やstaging親にreparse・危険なACLがあればBootstrapは拒否します。ACLを緩めて回避しないでください。署名検証の失効確認・タイムスタンプは未対応です。Bootstrap自体の信頼が必要です。実際のコード署名証明書を持つ配布者はBootstrapOutputPathで別出力・Authenticode署名できます。現在の開発版には製品署名は付いていません。
 
