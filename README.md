@@ -38,7 +38,7 @@ v1.1.0では、スキャン失敗の再試行、ログ削除検知、イベン�
 
 企業製品と同等の防御性能は未実証です。Windows 11での診断・CIと、実際の管理者導入・Defenderスキャン・長期運用の検証は別です。
 
-実マルウェアに対する検知率・正常操作の誤検知率・検知時間・ATT&CKカバレッジは未測定です。[評価ガイド](docs/EVALUATION_JP.md)に、段階的な測定手順と試験結果の入力・集計方法を記載しています。同梱のサンプルは架空データで、製品性能の実測値ではありません。
+実マルウェアに対する検知率・正常操作の誤検知率・検知時間・ATT&CKカバレッジは未測定です。[評価ガイド](docs/EVALUATION_JP.md)に、段階的な測定手順、測定前の読み取り専用診断、試験結果の入力・集計方法を記載しています。同梱のサンプルは架空データで、製品性能の実測値ではありません。
 
 ## 主な機能
 
@@ -152,6 +152,7 @@ GitHub ActionsでWindows Server 2022 / 2025のWindows PowerShell 5.1を使用し
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-PilotTests.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-EvaluationTests.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-EvaluationReadinessTests.ps1
 ```
 
 テストは一時フォルダーとモックを使用します。Defenderの実スキャン、インストール、OS設定変更は行いません。Windowsの実機・VMでのインストール後の検証は別途必要です。

@@ -1,6 +1,7 @@
 Unreleased - evaluation foundation (2026-10-03)
 - Offline per-source trial rates, first-alert latency and scoped ATT&CK emulation coverage reports.
 - Explicit synthetic examples, unmeasured values, error exclusions and auditable input records.
+- Read-only measurement preflight checks runtime identity, tasks, checkpoints and event access without creating trial rates or importing installed code.
 - Japanese staged evaluation guide and Windows CI aggregation regressions; real malware efficacy remains unmeasured.
 
 v1.2.1 (2026-09-29)

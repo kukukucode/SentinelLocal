@@ -23,6 +23,7 @@ Windows専用です。リポジトリのルートにはREADME、変更履歴、G
 .\tests\Run-PilotTests.ps1
 .\tests\Run-SecurityTests.ps1
 .\tests\Run-EvaluationTests.ps1
+.\tests\Run-EvaluationReadinessTests.ps1
 .\scripts\Test-SentinelReadiness.ps1
 ~~~
 
