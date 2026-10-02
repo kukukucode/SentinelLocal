@@ -200,7 +200,7 @@ try {
                 $skipByHash = $false
                 $hasLiveProcessIdentity = ([int]$request.ProcessIdValue -gt 0)
                 if (
-                    $requestHash -and
+                    $requestHash -and $requestHash -ieq [string]$request.ObservedSHA256 -and
                     -not $hasLiveProcessIdentity -and
                     [int]$request.Score -lt [int]$config.ResponseQueueHighScore -and
                     $hashDedupe.ContainsKey($requestHash)

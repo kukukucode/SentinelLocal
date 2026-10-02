@@ -1,4 +1,4 @@
-# SentinelLocal v1.2.0
+# SentinelLocal v1.2.1
 
 [![Windows CI](https://github.com/kukukucode/SentinelLocal/actions/workflows/windows-ci.yml/badge.svg)](https://github.com/kukukucode/SentinelLocal/actions/workflows/windows-ci.yml)
 
@@ -33,7 +33,7 @@ Microsoft Defenderを主防御エンジンとして利用する、軽量Host IDS
 
 v1.1.0では、スキャン失敗の再試行、ログ削除検知、イベントの取りこぼし対策、応答処理のタイムアウトを追加しました。Windows用の状態画面と通知、期限付き例外、監査ログの外部出力、別PCからの死活確認、任意のSysmon連携にも対応しています。設定・運用方法は[運用ガイド](docs/OPERATIONS_JP.md)を参照してください。
 
-現在の **v1.2.0はWindows PC 1台向けの試験運用版** です。内容のハッシュによる再スキャン判定、再起動をまたぐ永続化比較、容量管理、更新の復元・起動確認、読み取り専用の診断、HTML/JSON調査レポート、設定の検証・復元、署名付きパッケージの検証に対応します。[個人PC試験運用ガイド](docs/PILOT_JP.md)を参照してください。
+現在の **v1.2.1はWindows PC 1台向けの試験運用版** です。内容のハッシュによる再スキャン判定、再起動をまたぐ永続化比較、容量管理、更新の復元・起動確認、読み取り専用の診断、HTML/JSON調査レポート、設定の検証・復元、署名付きパッケージの検証に対応します。[個人PC試験運用ガイド](docs/PILOT_JP.md)を参照してください。
 
 企業製品と同等の防御性能は未実証です。Windows 11での診断・CIと、実際の管理者導入・Defenderスキャン・長期運用の検証は別です。
 
@@ -56,53 +56,33 @@ v1.1.0では、スキャン失敗の再試行、ログ削除検知、イベン�
 
 ## インストール
 
-ダウンロードしたファイルを展開し、管理者として起動したWindows PowerShellで、そのフォルダーから実行してください。
+**Windows専用です。管理者Windows PowerShell 5.1で実行します。** 配布payloadとは独立してレビューしたBootstrapをC:\TrustedTools\Bootstrap.ps1へ用意してください。Bootstrap自体とsigner pinを未信頼のDownloadsだけから取得しないでください。
 
-GitHubのソースリポジトリから導入する場合:
+署名付きflat packageの導入例です。$signerPinには別の信頼できる経路で確認したコード署名証明書の拇印40桁を指定します。
 
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-.\scripts\Install-SentinelLocal.ps1 -AllowUnsignedPackage
-```
+~~~powershell
+$signerPin = '<独立して確認した証明書の拇印40桁>'
+& 'C:\TrustedTools\Bootstrap.ps1' -PackageRoot 'C:\Downloads\SentinelLocal-package' -Mode Verify -TrustedSignerThumbprint $signerPin
+& 'C:\TrustedTools\Bootstrap.ps1' -PackageRoot 'C:\Downloads\SentinelLocal-package' -Mode Install -TrustedSignerThumbprint $signerPin
+~~~
 
-作成済みの配布パッケージから導入する場合:
+Bootstrapはpayloadをdot-sourceせずに検証し、管理者/SYSTEMだけのstagingへ検証済みbytesをコピーします。再hash確認後、そのstaging内のinstallerを実行します。配布フォルダのInstall-SentinelLocal.ps1 / Upgrade-SentinelLocal.ps1を直接実行する手順は廃止しました。
 
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-.\Install-SentinelLocal.ps1 -AllowUnsignedPackage
-```
+現在の開発版には製品用の信頼済み署名はありません。レビューしたソースから署名なしで試す開発手順は[PC試験運用ガイド](docs/PILOT_JP.md)を参照してください。[v1.2.1の修正と制限](docs/SECURITY_JP.md)も確認してください。
 
-既定のインストール先は`C:\ProgramData\SentinelLocal`です。以下のタスクがSYSTEM権限で登録されます。
+導入先の初期値はC:\ProgramData\SentinelLocalです。Watcher、Response Worker、Integrity MonitorのSYSTEMタスクを登録します。通常導入はDefender設定を変更しません。変更計画は次のコマンドで確認します。
 
-- SentinelLocal Watcher
-- SentinelLocal Response Worker
-- SentinelLocal Integrity Monitor
-
-DefenderのAuditFirstプロファイルを適用する前に、変更計画を確認します。
-
-```powershell
+~~~powershell
 & 'C:\ProgramData\SentinelLocal\DefenderHardening.ps1' -Profile AuditFirst -WhatIf
-```
-
-Defender設定はAuditFirstから開始し、業務への影響を確認してからBlockへ進める設計です。
+~~~
 
 ## 既存インストールの更新
 
-既存の設定値を保持して更新する場合は、管理者Windows PowerShellで実行してください。元パッケージの旧v2.4向けキュー移行処理も含まれています。
+同じ独立Bootstrapとsigner pinを使います。既存設定を保持し、新しい初期値を追加します。更新失敗時はコード・設定・baseline・タスクを復元します。
 
-ソースリポジトリから更新する場合:
-
-```powershell
-.\scripts\Upgrade-SentinelLocal.ps1 -AllowUnsignedPackage
-```
-
-配布パッケージから更新する場合:
-
-```powershell
-.\Upgrade-SentinelLocal.ps1 -AllowUnsignedPackage
-```
-
-署名なし試験版を使う例です。署名付きパッケージではTrustedSignerThumbprintを指定し、信頼済みの検証スクリプトで事前に確認してください。インストール後のHeartbeat確認に失敗した更新は復元されます。
+~~~powershell
+& 'C:\TrustedTools\Bootstrap.ps1' -PackageRoot 'C:\Downloads\SentinelLocal-package' -Mode Upgrade -TrustedSignerThumbprint $signerPin
+~~~
 
 ## 診断とログ検証
 

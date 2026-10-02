@@ -1,6 +1,38 @@
 ﻿#Requires -RunAsAdministrator
-param([string]$InstallRoot='C:\ProgramData\SentinelLocal',[string]$TrustedSignerThumbprint,[switch]$AllowUnsignedPackage,[ValidateRange(5,300)][int]$StartupTimeoutSeconds=90)
+param([string]$InstallRoot='C:\ProgramData\SentinelLocal',[string]$StageReceiptPath,[ValidateRange(5,300)][int]$StartupTimeoutSeconds=90)
 $ErrorActionPreference='Stop'
+# Internal payload entry: only a protected Bootstrap stage may call this script.
+# This guard uses .NET and built-in JSON parsing before any payload import.
+if(-not $StageReceiptPath -or [IO.Path]::GetFullPath($StageReceiptPath) -ine (Join-Path $PSScriptRoot '.sentinel-stage.json')) {throw 'Run the independently trusted bootstrap/Bootstrap.ps1; direct installation is refused.'}
+$stageAcl=[IO.Directory]::GetAccessControl($PSScriptRoot)
+if(-not $stageAcl.AreAccessRulesProtected -or $stageAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @('S-1-5-32-544','S-1-5-18')) {throw 'Untrusted staging owner or ACL.'}
+$stageRules=@($stageAcl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
+if($stageRules.Count -ne 2) {throw 'Untrusted staging ACL.'}
+foreach($rule in $stageRules) {
+    if($rule.IdentityReference.Value -notin @('S-1-5-32-544','S-1-5-18') -or $rule.AccessControlType -ne 'Allow' -or $rule.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl) {throw 'Untrusted staging ACL.'}
+}
+$stageReceipt=[IO.File]::ReadAllText($StageReceiptPath) | ConvertFrom-Json -ErrorAction Stop
+$stageManifestPath=Join-Path $PSScriptRoot 'package.manifest.json'
+$stageManifest=[IO.File]::ReadAllText($stageManifestPath) | ConvertFrom-Json -ErrorAction Stop
+$sha=[Security.Cryptography.SHA256]::Create()
+try {
+    $manifestHash=([BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($stageManifestPath)))).Replace('-','')
+    if($stageReceipt.Schema -ne 1 -or $stageReceipt.Product -ne 'SentinelLocal' -or $manifestHash -ine $stageReceipt.ManifestSHA256 -or $stageManifest.Version -ne $stageReceipt.Version) {throw 'Staging receipt mismatch.'}
+    $seen=@{}
+    foreach($entry in @($stageManifest.Files)) {
+        $name=[string]$entry.Name
+        if($name -notmatch '^(?:[A-Za-z0-9_.-]+|docs/[A-Za-z0-9_.-]+)$' -or $name.Contains('..') -or $seen.ContainsKey($name)) {throw 'Unsafe staging file name.'}
+        $seen[$name]=$true;$path=Join-Path $PSScriptRoot $name
+        $p=$path
+        while($p) {
+            if([IO.File]::GetAttributes($p) -band [IO.FileAttributes]::ReparsePoint) {throw 'Reparse staging path.'}
+            $p=[IO.Path]::GetDirectoryName($p.TrimEnd('\'))
+        }
+        $hash=([BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($path)))).Replace('-','')
+        if($hash -ine $entry.SHA256 -or ([IO.FileInfo]$path).Length -ne [long]$entry.Length) {throw ('Staging file changed: '+$name)}
+    }
+} finally {$sha.Dispose()}
+# END BOOTSTRAP GUARD
 $commonPath=Join-Path $PSScriptRoot 'Common.ps1'
 if(-not (Test-Path -LiteralPath $commonPath -PathType Leaf)) { $commonPath=Join-Path (Split-Path -Parent $PSScriptRoot) 'src\Common.ps1' }
 . $commonPath
@@ -27,12 +59,12 @@ foreach($file in $files) {
         if($errors.Count) { throw ('Syntax failure: '+$file) }
     }
 }
-if(Test-Path -LiteralPath (Join-Path $sourceRoot 'package.manifest.json')) {
-    $verifiedPackage=Test-SentinelPackage $sourceRoot $TrustedSignerThumbprint -AllowUnsigned:$AllowUnsignedPackage
-} elseif(-not $AllowUnsignedPackage -or $TrustedSignerThumbprint) { throw 'A verified signed package is required. Use -AllowUnsignedPackage only for a reviewed pilot source package.' }
+$verifiedPackage=$stageReceipt
 $verifiedHashes=@{}
 foreach($file in $files) {
-    $verifiedHashes[$file]=if($verifiedPackage) { @($verifiedPackage.FileEntries | Where-Object Name -eq $file)[0].SHA256 } else { (Get-FileHash -LiteralPath (Get-SentinelSourcePath $sourceRoot $file) -Algorithm SHA256 -ErrorAction Stop).Hash }
+    $entries=@($stageManifest.Files | Where-Object Name -eq $file)
+    if($entries.Count -ne 1) {throw ('Staged package omitted: '+$file)}
+    $verifiedHashes[$file]=$entries[0].SHA256
 }
 $packageConfig=Get-Content -LiteralPath (Get-SentinelSourcePath $sourceRoot 'Config.json') -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
 Assert-SentinelConfig $packageConfig
@@ -118,14 +150,14 @@ try {
     $trigger=New-ScheduledTaskTrigger -AtStartup
     $principal=New-ScheduledTaskPrincipal -UserId SYSTEM -LogonType ServiceAccount -RunLevel Highest
     $settings=New-ScheduledTaskSettingsSet -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 3650) -StartWhenAvailable
-    Register-ScheduledTask -TaskName $watcherTaskName -Action (New-SentinelTaskAction 'Watcher.ps1') -Trigger $trigger -Principal $principal -Settings $settings -Description 'SentinelLocal v1.2.0 process, persistence and Defender monitoring' | Out-Null
-    Register-ScheduledTask -TaskName $responseWorkerTaskName -Action (New-SentinelTaskAction 'ResponseWorker.ps1') -Trigger $trigger -Principal $principal -Settings $settings -Description 'SentinelLocal v1.2.0 bounded priority response worker' | Out-Null
-    Register-ScheduledTask -TaskName $integrityTaskName -Action (New-SentinelTaskAction 'IntegrityMonitor.ps1') -Trigger $trigger -Principal $principal -Settings $settings -Description 'SentinelLocal v1.2.0 integrity and availability monitoring' | Out-Null
+    Register-ScheduledTask -TaskName $watcherTaskName -Action (New-SentinelTaskAction 'Watcher.ps1') -Trigger $trigger -Principal $principal -Settings $settings -Description 'SentinelLocal v1.2.1 process, persistence and Defender monitoring' | Out-Null
+    Register-ScheduledTask -TaskName $responseWorkerTaskName -Action (New-SentinelTaskAction 'ResponseWorker.ps1') -Trigger $trigger -Principal $principal -Settings $settings -Description 'SentinelLocal v1.2.1 bounded priority response worker' | Out-Null
+    Register-ScheduledTask -TaskName $integrityTaskName -Action (New-SentinelTaskAction 'IntegrityMonitor.ps1') -Trigger $trigger -Principal $principal -Settings $settings -Description 'SentinelLocal v1.2.1 integrity and availability monitoring' | Out-Null
     & (Join-Path $InstallRoot 'Update-SentinelIntegrityBaseline.ps1') -Root $InstallRoot
     $started=[datetimeoffset]::Now
     foreach($name in @($responseWorkerTaskName,$watcherTaskName,$integrityTaskName)) { Start-ScheduledTask -TaskName $name -ErrorAction Stop }
     Wait-SentinelDeploymentReady -Root $InstallRoot -Version $mergedConfig.Version -StartedAfter $started -TimeoutSeconds $StartupTimeoutSeconds
-    if(-not (Write-SentinelJsonLine (Join-Path $InstallRoot 'logs\administration.jsonl') ([ordered]@{Type='DeploymentCompleted';Severity='MEDIUM';Version=$mergedConfig.Version;Operator=[Security.Principal.WindowsIdentity]::GetCurrent().Name;SignedPackage=[bool]$TrustedSignerThumbprint}))) { throw 'Deployment audit could not be persisted.' }
+    if(-not (Write-SentinelJsonLine (Join-Path $InstallRoot 'logs\administration.jsonl') ([ordered]@{Type='DeploymentCompleted';Severity='MEDIUM';Version=$mergedConfig.Version;Operator=[Security.Principal.WindowsIdentity]::GetCurrent().Name;SignedPackage=[bool]$stageReceipt.Signed}))) { throw 'Deployment audit could not be persisted.' }
 } catch {
     $failure=$_.Exception
     if($changed -and $backupReady) {

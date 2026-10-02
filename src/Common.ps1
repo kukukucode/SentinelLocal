@@ -5,6 +5,8 @@
 . (Join-Path $PSScriptRoot 'Deployment.ps1')
 . (Join-Path $PSScriptRoot 'PackageTrust.ps1')
 . (Join-Path $PSScriptRoot 'PolicyManagement.ps1')
+. (Join-Path $PSScriptRoot 'DetectionSafety.ps1')
+. (Join-Path $PSScriptRoot 'TaskIntegrity.ps1')
 
 function Get-SentinelStringHash {
     param([Parameter(Mandatory=$true)][string]$Text)
@@ -221,22 +223,20 @@ function Invoke-SentinelRetention {
     try {
         if (Test-Path $evidenceDir) {
             Get-ChildItem $evidenceDir -Directory -ErrorAction Stop |
-                Where-Object { $_.LastWriteTime -lt $cutoff } |
+                Where-Object {
+                    if($_.Name -eq 'queued') {return $false}
+                    if(Test-Path -LiteralPath (Join-Path $_.FullName 'response.json')) {
+                        try {$r=Get-Content -LiteralPath (Join-Path $_.FullName 'response.json') -Raw | ConvertFrom-Json -ErrorAction Stop;if($r.Unresolved){return $false}} catch {return $false}
+                    }
+                    return $_.LastWriteTime -lt $cutoff
+                } |
                 Remove-Item -Recurse -Force -ErrorAction Stop
         }
     } catch {
         Write-SentinelError -Root $Root -Component "Retention" -Operation "Delete old evidence" -Exception $_.Exception
     }
 
-    try {
-        if (Test-Path $failedQueueDir) {
-            Get-ChildItem $failedQueueDir -File -Filter "*.json" -ErrorAction Stop |
-                Where-Object { $_.LastWriteTime -lt $cutoff } |
-                Remove-Item -Force -ErrorAction Stop
-        }
-    } catch {
-        Write-SentinelError -Root $Root -Component "Retention" -Operation "Delete old failed response requests" -Exception $_.Exception
-    }
+    # Failed requests stay unresolved until explicit operator review.
 
     if (-not (Test-Path $logDir)) { return }
 
@@ -343,6 +343,8 @@ function Get-SentinelCriticalFileNames {
         "OperationalSafety.ps1",
         "Deployment.ps1",
         "PackageTrust.ps1",
+        "DetectionSafety.ps1",
+        "TaskIntegrity.ps1",
         "PolicyManagement.ps1",
         "Test-SentinelReadiness.ps1",
         "Export-SentinelReport.ps1",
@@ -389,11 +391,11 @@ function Get-SentinelSourceRoot {
 
 function Get-SentinelSourcePath {
     param([string]$Root,[string]$Name)
-    if($Name -notin @(Get-SentinelPackageFiles) -and $Name -notin @('README.md','README_JP.txt','CHANGELOG.txt','docs/OPERATIONS_JP.md','docs/PILOT_JP.md','docs/REPOSITORY_JP.md')) { throw 'Unknown SentinelLocal source file.' }
+    if($Name -notin @(Get-SentinelPackageFiles) -and $Name -notin @('README.md','README_JP.txt','CHANGELOG.txt','docs/OPERATIONS_JP.md','docs/PILOT_JP.md','docs/REPOSITORY_JP.md','docs/SECURITY_JP.md')) { throw 'Unknown SentinelLocal source file.' }
     # Installed and distribution packages retain their flat file layout.
     $flat=Join-Path $Root $Name
     if(Test-Path -LiteralPath $flat -PathType Leaf) { return [IO.Path]::GetFullPath($flat) }
-    $runtime=@('Common.ps1','LogIntegrity.ps1','EventMonitoring.ps1','ResponseExecution.ps1','OperationalSafety.ps1','Deployment.ps1','PackageTrust.ps1','PolicyManagement.ps1','DefenderHealth.ps1','Response.ps1','ResponseWorker.ps1','Watcher.ps1','IntegrityMonitor.ps1','Invoke-SentinelResponse.ps1','Status.ps1','SysmonMonitoring.ps1')
+    $runtime=@('DetectionSafety.ps1','TaskIntegrity.ps1','Common.ps1','LogIntegrity.ps1','EventMonitoring.ps1','ResponseExecution.ps1','OperationalSafety.ps1','Deployment.ps1','PackageTrust.ps1','PolicyManagement.ps1','DefenderHealth.ps1','Response.ps1','ResponseWorker.ps1','Watcher.ps1','IntegrityMonitor.ps1','Invoke-SentinelResponse.ps1','Status.ps1','SysmonMonitoring.ps1')
     $relative=if($Name -eq 'Config.json') { 'config\Config.json' }
         elseif($Name -eq 'README_JP.txt') { 'docs\README_JP.txt' }
         elseif($Name -in $runtime) { 'src\'+$Name }

@@ -37,6 +37,10 @@ jobs:
         run: |
           & .\tests\Run-PilotTests.ps1 -ScratchRoot (Join-Path $env:RUNNER_TEMP 'SentinelLocal-pilot-tests')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Security boundaries and protected staging regression
+        run: |
+          & .\tests\Run-SecurityTests.ps1 -ScratchRoot (Join-Path $env:RUNNER_TEMP 'SentinelLocal-security-tests') -RequireSecureStagingTests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Windows package preflight
         run: |
           & .\scripts\SelfTest-SentinelLocal.ps1 -Root $env:GITHUB_WORKSPACE -PreStart
@@ -53,5 +57,6 @@ jobs:
           path: |
             ${{ runner.temp }}/SentinelLocal-tests/test-results.json
             ${{ runner.temp }}/SentinelLocal-pilot-tests/test-results.json
+            ${{ runner.temp }}/SentinelLocal-security-tests/test-results.json
           if-no-files-found: warn
           retention-days: 14

@@ -1,5 +1,5 @@
-﻿{
-  "Version": "1.2.0",
+{
+  "Version": "1.2.1",
   "PollSeconds": 2,
   "PersistencePollSeconds": 15,
   "DefenderHealthPollSeconds": 60,
@@ -68,10 +68,13 @@
     "MinFreeDiskMB": 512,
     "MaxEvidenceMB": 2048,
     "MaxLogFileMB": 64,
-    "StorageCheckSeconds": 5
+    "StorageCheckSeconds": 5,
+    "MaxSnapshotFileMB": 32
   },
   "Scheduling": {
     "NormalAgingSeconds": 120,
     "HighBurstLimit": 5
-  }
+  },
+  "AutoGlobalRemoveMpThreat": false,
+  "CaptureQueuedFileSnapshot": true
 }

@@ -1,4 +1,4 @@
-﻿param([string]$Root=$PSScriptRoot,[Parameter(Mandatory=$true)][string]$OutputDirectory,[string]$CertificateThumbprint)
+﻿param([string]$Root=$PSScriptRoot,[Parameter(Mandatory=$true)][string]$OutputDirectory,[string]$CertificateThumbprint,[string]$BootstrapOutputPath)
 $ErrorActionPreference='Stop'
 $commonPath=Join-Path $PSScriptRoot 'Common.ps1'
 if(-not (Test-Path -LiteralPath $commonPath -PathType Leaf)) { $commonPath=Join-Path (Split-Path -Parent $PSScriptRoot) 'src\Common.ps1' }
@@ -16,7 +16,7 @@ if($CertificateThumbprint) {
 }
 New-Item -ItemType Directory -Path $OutputDirectory | Out-Null
 $files=@()
-foreach($name in @((Get-SentinelPackageFiles)+@('README.md','README_JP.txt','CHANGELOG.txt','docs/OPERATIONS_JP.md','docs/PILOT_JP.md','docs/REPOSITORY_JP.md'))) {
+foreach($name in @((Get-SentinelPackageFiles)+@('README.md','README_JP.txt','CHANGELOG.txt','docs/OPERATIONS_JP.md','docs/PILOT_JP.md','docs/REPOSITORY_JP.md','docs/SECURITY_JP.md'))) {
     $source=Get-SentinelPackagePath $Root $name
     $destination=Join-Path $OutputDirectory $name
     New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
@@ -29,7 +29,7 @@ foreach($name in @((Get-SentinelPackageFiles)+@('README.md','README_JP.txt','CHA
 }
 $config=Get-Content -LiteralPath (Get-SentinelSourcePath $Root 'Config.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $manifestPath=Join-Path $OutputDirectory 'package.manifest.json'
-Write-SentinelAtomicJson $manifestPath ([ordered]@{Schema=1;Version=$config.Version;CreatedAt=(Get-Date).ToString('o');Files=$files})
+Write-SentinelAtomicJson $manifestPath ([ordered]@{Schema=1;Product='SentinelLocal';Version=$config.Version;CreatedAt=(Get-Date).ToString('o');Files=$files})
 if($certificate) {
     Add-Type -AssemblyName System.Security
     $cms=[Security.Cryptography.Pkcs.SignedCms]::new([Security.Cryptography.Pkcs.ContentInfo]::new([IO.File]::ReadAllBytes($manifestPath)),$true)
@@ -37,4 +37,17 @@ if($certificate) {
     $signer.DigestAlgorithm=[Security.Cryptography.Oid]::new('2.16.840.1.101.3.4.2.1')
     $cms.ComputeSignature($signer);[IO.File]::WriteAllBytes($manifestPath+'.p7s',$cms.Encode())
 }
+if($BootstrapOutputPath) {
+    $bootstrapSource=Join-Path $Root 'bootstrap\Bootstrap.ps1'
+    if(-not (Test-Path -LiteralPath $bootstrapSource -PathType Leaf)) {throw 'Separate Bootstrap output requires the reviewed source repository.'}
+    $bootstrapDestination=[IO.Path]::GetFullPath($BootstrapOutputPath)
+    if($bootstrapDestination.StartsWith($output,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $bootstrapDestination)) {throw 'Bootstrap must be emitted separately to a new trusted-tool path.'}
+    New-Item -ItemType Directory -Path (Split-Path -Parent $bootstrapDestination) -Force | Out-Null
+    Copy-Item -LiteralPath $bootstrapSource -Destination $bootstrapDestination
+    if($certificate) {
+        $signature=Set-AuthenticodeSignature -FilePath $bootstrapDestination -Certificate $certificate -HashAlgorithm SHA256 -ErrorAction Stop
+        if(-not $signature.SignerCertificate -or $signature.SignerCertificate.Thumbprint -ine $certificate.Thumbprint) {throw 'Bootstrap Authenticode signing failed.'}
+    }
+}
+
 Test-SentinelPackage -Root $OutputDirectory -TrustedSignerThumbprint $CertificateThumbprint -AllowUnsigned:(-not $certificate)

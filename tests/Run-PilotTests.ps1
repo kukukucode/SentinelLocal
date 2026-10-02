@@ -22,8 +22,8 @@ function Fixture([string]$Name,[switch]$Baseline,[switch]$SourceLayout) {
         Copy-Item -LiteralPath $source -Destination $destination
     }
     if($Baseline) {
-        $files=@(foreach($file in Get-SentinelPackageFiles) { $item=Get-Item -LiteralPath (Join-Path $directory $file);[pscustomobject]@{Name=$file;SHA256=(Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash;Length=$item.Length;LastWriteTimeUtc=$item.LastWriteTimeUtc.ToString('o')} })
-        Write-SentinelAtomicJson (Join-Path $directory 'state\integrity-baseline.json') ([ordered]@{Version='1.2.0';Files=$files})
+        $files=@(foreach($file in Get-SentinelPackageFiles) { $item=Get-Item -LiteralPath (Join-Path $directory $file);[pscustomobject]@{Name=$file;Path=$item.FullName;SHA256=(Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash;Length=$item.Length;LastWriteTimeUtc=$item.LastWriteTimeUtc.ToString('o')} })
+        Write-SentinelAtomicJson (Join-Path $directory 'state\integrity-baseline.json') ([ordered]@{Version='1.2.1';Files=$files})
     }
     return $directory
 }
@@ -56,7 +56,8 @@ Test 'Repository folders build the installed flat layout with valid documentatio
     & (Get-SentinelSourcePath $packageRoot 'New-SentinelPackage.ps1') -OutputDirectory $output | Out-Null
     foreach($file in Get-SentinelPackageFiles) { Assert (Test-Path -LiteralPath (Join-Path $output $file) -PathType Leaf) ('Flat deployment file missing: '+$file) }
     Assert (-not (Test-Path (Join-Path $output 'src')) -and -not (Test-Path (Join-Path $output 'scripts'))) 'Source folders leaked into deployed paths'
-    $verified=& (Join-Path $output 'Verify-SentinelPackage.ps1') -AllowUnsignedPackage
+    $manifestHash=(Get-FileHash (Join-Path $output 'package.manifest.json')).Hash
+    $verified=& (Join-Path $packageRoot 'bootstrap\Bootstrap.ps1') -PackageRoot $output -DevelopmentUnsigned -ExpectedManifestSHA256 $manifestHash
     Assert $verified.Valid 'Distribution default verification root failed'
     foreach($readmePath in @((Join-Path $packageRoot 'README.md'),(Join-Path $output 'README.md'))) {
         foreach($match in [regex]::Matches([IO.File]::ReadAllText($readmePath),'\]\(([^)]+)\)')) {
@@ -162,7 +163,7 @@ Test 'Rollback restores integrity baseline and removes every newly installed mod
     [void](Restore-SentinelDeploymentBackup $root $backup)
     Assert (-not (Test-Path -LiteralPath $newFile)) 'New module survived rollback'
     Assert ((Get-FileHash $baselinePath).Hash -eq $oldHash) 'Integrity baseline was not restored'
-    Assert ((Config $root).Version -eq '1.2.0') 'Configuration was not restored'
+    Assert ((Config $root).Version -eq '1.2.1') 'Configuration was not restored'
 }
 Test 'Corrupt rollback backup cannot partially overwrite installation' {
     $root=Fixture 'bad-rollback';$backup=Join-Path $root 'backups\probe';New-SentinelDeploymentBackup $root $backup @{}
@@ -282,6 +283,11 @@ Test 'Upgrade startup failure restores old files baseline and task states' {
     [IO.File]::WriteAllText($baselineUpdater,[IO.File]::ReadAllText($baselineUpdater).Replace('#Requires -RunAsAdministrator',''),[Text.UTF8Encoding]::new($true))
     $scriptPath=Get-SentinelSourcePath $source 'Upgrade-SentinelLocal.ps1'
     $scriptText=[IO.File]::ReadAllText($scriptPath).Replace('#Requires -RunAsAdministrator','')
+    # This rollback fixture mocks privileged deployment. Real staging guards have separate tests.
+    $guardStart=$scriptText.IndexOf('# Internal payload entry:')
+    $guardEnd=$scriptText.IndexOf('# END BOOTSTRAP GUARD')+'# END BOOTSTRAP GUARD'.Length
+    $fixturePrelude='$stageReceipt=[pscustomobject]@{Signed=$false};$stageManifest=[pscustomobject]@{Files=@(foreach($n in Get-SentinelPackageFiles){[pscustomobject]@{Name=$n;SHA256=(Get-FileHash -LiteralPath (Get-SentinelSourcePath $source $n)).Hash}})}'
+    $scriptText=$scriptText.Substring(0,$guardStart)+$fixturePrelude+$scriptText.Substring($guardEnd)
     $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseInput($scriptText,[ref]$tokens,[ref]$errors)
     $acl=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Set-SentinelAcl'},$true)
     $scriptText=$scriptText.Replace($acl.Extent.Text,'function Set-SentinelAcl { param($Path) }')
@@ -307,7 +313,7 @@ Test 'Upgrade startup failure restores old files baseline and task states' {
     }
     $failed=$false
     $errorText=''
-    try { & $scriptPath -InstallRoot $installed -AllowUnsignedPackage -StartupTimeoutSeconds 5 | Out-Null } catch { $errorText=$_.Exception.Message;$failed=$errorText -like '*heartbeat*' }
+    try { & $scriptPath -InstallRoot $installed -StartupTimeoutSeconds 5 | Out-Null } catch { $errorText=$_.Exception.Message;$failed=$errorText -like '*heartbeat*' }
     Assert $failed ('Expected startup heartbeat failure; actual: '+$errorText)
     Assert ((Config $installed).Version -eq '1.1.0' -and (Get-FileHash (Join-Path $installed 'Common.ps1')).Hash -eq $oldCommonHash -and (Get-FileHash (Join-Path $installed 'state\integrity-baseline.json')).Hash -eq $oldBaselineHash) 'Upgrade failed to restore previous files'
     Assert ($fixtureTasks['SentinelLocal Watcher'].State -eq 'Running' -and $fixtureTasks['SentinelLocal Response Worker'].State -eq 'Ready' -and $fixtureTasks['SentinelLocal Integrity Monitor'].State -eq 'Ready') 'Rollback changed previous task states'
@@ -317,11 +323,11 @@ Test 'Startup verification rejects stale or wrong-version heartbeat' {
     foreach($name in @('watcher-heartbeat.json','response-worker-heartbeat.json','integrity-monitor-heartbeat.json')) {
         Write-SentinelAtomicJson (Join-Path $root ('state\'+$name)) ([ordered]@{Version='1.1.0';WatcherProcessId=$PID;Status='Running';LastUpdated=[datetimeoffset]::Now.ToString('o')})
     }
-    $failed=$false;try { Wait-SentinelDeploymentReady $root '1.2.0' $started 1 } catch {$failed=$true};Assert $failed 'Old version was accepted'
+    $failed=$false;try { Wait-SentinelDeploymentReady $root '1.2.1' $started 1 } catch {$failed=$true};Assert $failed 'Old version was accepted'
     foreach($name in @('watcher-heartbeat.json','response-worker-heartbeat.json','integrity-monitor-heartbeat.json')) {
-        Write-SentinelAtomicJson (Join-Path $root ('state\'+$name)) ([ordered]@{Version='1.2.0';WatcherProcessId=$PID;Status='Running';LastUpdated=[datetimeoffset]::Now.ToString('o')})
+        Write-SentinelAtomicJson (Join-Path $root ('state\'+$name)) ([ordered]@{Version='1.2.1';WatcherProcessId=$PID;Status='Running';LastUpdated=[datetimeoffset]::Now.ToString('o')})
     }
-    Wait-SentinelDeploymentReady $root '1.2.0' $started 1
+    Wait-SentinelDeploymentReady $root '1.2.1' $started 1
 }
 Write-SentinelAtomicJson (Join-Path $ScratchRoot 'test-results.json') @($results)
 $results | Format-Table -AutoSize

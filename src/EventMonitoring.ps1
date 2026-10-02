@@ -67,7 +67,7 @@ function Test-SentinelInternalResponse {
         if ([IO.Path]::GetDirectoryName($request) -ine (Join-Path $Root 'state\response-queue\processing') -or [IO.Path]::GetFileName($request) -notmatch '^\d{17}_[a-fA-F0-9-]{36}\.json$' -or $result -ine ($request+'.result')) { return $false }
         $expected="& '{0}' -Root '{1}' -RequestFile '{2}' -ResultPath '{3}'" -f $task.Replace("'","''"),$Root.Replace("'","''"),$request.Replace("'","''"),$result.Replace("'","''")
         if ($decoded -cne $expected) { return $false }
-        $baseline=Get-Content -LiteralPath (Join-Path $Root 'state\integrity-baseline.json') -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+        $baseline=Read-SentinelBaseline $Root
         $entry=@($baseline.Files | Where-Object { $_.Name -eq 'Invoke-SentinelResponse.ps1' })
         return $entry.Count -eq 1 -and $entry[0].SHA256 -eq (Get-FileHash -LiteralPath $task -Algorithm SHA256 -ErrorAction Stop).Hash
     } catch { return $false }
