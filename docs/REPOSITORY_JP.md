@@ -10,6 +10,7 @@ Windows専用です。リポジトリのルートにはREADME、変更履歴、G
 | config/Config.json | 配布時の初期設定 |
 | docs/ | 日本語説明書、運用・試験運用・構成ガイド |
 | tests/ | 回帰試験と補助スクリプト |
+| tools/evaluation/ | 試験結果のオフライン集計。常駐処理と配布payloadには含めない |
 | .github/workflows/ | Windows CI |
 
 ## ソースから診断と試験を実行
@@ -21,6 +22,7 @@ Windows専用です。リポジトリのルートにはREADME、変更履歴、G
 .\tests\Run-Tests.ps1
 .\tests\Run-PilotTests.ps1
 .\tests\Run-SecurityTests.ps1
+.\tests\Run-EvaluationTests.ps1
 .\scripts\Test-SentinelReadiness.ps1
 ~~~
 

@@ -1,3 +1,8 @@
+Unreleased - evaluation foundation (2026-10-03)
+- Offline per-source trial rates, first-alert latency and scoped ATT&CK emulation coverage reports.
+- Explicit synthetic examples, unmeasured values, error exclusions and auditable input records.
+- Japanese staged evaluation guide and Windows CI aggregation regressions; real malware efficacy remains unmeasured.
+
 v1.2.1 (2026-09-29)
 - Independent Bootstrap, signed/pinned verification and protected staging; direct payload installation refused.
 - Queue content identity, bounded protected snapshots, live missing/changed HIGH outcomes and retained unresolved requests.

@@ -1,0 +1,87 @@
+{
+  "Schema": 1,
+  "Run": {
+    "Id": "synthetic-example-not-a-benchmark",
+    "EvidenceType": "Synthetic",
+    "SentinelVersion": "1.2.1",
+    "ConfigSHA256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "WindowsVersion": "Synthetic",
+    "DefenderVersion": "Synthetic",
+    "SysmonVersion": "Synthetic",
+    "CorpusId": "Invented records; no malware files or trials",
+    "AttackVersion": "Example scope only",
+    "AttackScope": ["T1059.001", "T1547.001", "T1047"]
+  },
+  "Cases": [
+    {
+      "Id": "invented-malware-alert",
+      "Category": "Malware",
+      "Status": "Completed",
+      "ArtifactSHA256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "StartedAt": "2026-01-01T00:00:00Z",
+      "EndedAt": "2026-01-01T00:01:00Z",
+      "TechniqueId": null,
+      "Alerts": [
+        {"Source": "Sentinel", "Timestamp": "2026-01-01T00:00:02Z", "EvidenceRef": "synthetic://sentinel/1"},
+        {"Source": "Defender", "Timestamp": "2026-01-01T00:00:01Z", "EvidenceRef": "synthetic://defender/1"}
+      ]
+    },
+    {
+      "Id": "invented-malware-miss",
+      "Category": "Malware",
+      "Status": "Completed",
+      "ArtifactSHA256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "StartedAt": "2026-01-01T00:02:00Z",
+      "EndedAt": "2026-01-01T00:03:00Z",
+      "TechniqueId": null,
+      "Alerts": []
+    },
+    {
+      "Id": "invented-trial-error",
+      "Category": "Malware",
+      "Status": "Error",
+      "Error": "Synthetic setup failure",
+      "ArtifactSHA256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "StartedAt": "2026-01-01T00:04:00Z",
+      "EndedAt": "2026-01-01T00:05:00Z",
+      "TechniqueId": null,
+      "Alerts": []
+    },
+    {
+      "Id": "invented-benign-clean",
+      "Category": "Benign",
+      "Status": "Completed",
+      "StartedAt": "2026-01-01T00:06:00Z",
+      "EndedAt": "2026-01-01T00:07:00Z",
+      "TechniqueId": null,
+      "Alerts": []
+    },
+    {
+      "Id": "invented-benign-alert",
+      "Category": "Benign",
+      "Status": "Completed",
+      "StartedAt": "2026-01-01T00:08:00Z",
+      "EndedAt": "2026-01-01T00:09:00Z",
+      "TechniqueId": null,
+      "Alerts": [{"Source": "Sentinel", "Timestamp": "2026-01-01T00:08:03Z", "EvidenceRef": "synthetic://sentinel/benign"}]
+    },
+    {
+      "Id": "invented-emulation-alert",
+      "Category": "Emulation",
+      "Status": "Completed",
+      "StartedAt": "2026-01-01T00:10:00Z",
+      "EndedAt": "2026-01-01T00:11:00Z",
+      "TechniqueId": "T1059.001",
+      "Alerts": [{"Source": "Sentinel", "Timestamp": "2026-01-01T00:10:04Z", "EvidenceRef": "synthetic://sentinel/emulation"}]
+    },
+    {
+      "Id": "invented-emulation-miss",
+      "Category": "Emulation",
+      "Status": "Completed",
+      "StartedAt": "2026-01-01T00:12:00Z",
+      "EndedAt": "2026-01-01T00:13:00Z",
+      "TechniqueId": "T1547.001",
+      "Alerts": []
+    }
+  ]
+}

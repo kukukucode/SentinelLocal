@@ -54,7 +54,7 @@ function Sign([string]$Root,$Cert) {
 function Write-EventLog {} # No real Event Log/Defender/task mutation in this suite.
 Test 'Trusted bootstrap verifies bytes without importing payload code' {
     $root=Package 'bootstrap-valid';$r=VerifyDevelopment $root
-    Assert ($r.Valid -and $r.Files -eq @(Get-SentinelPackageFiles).Count+7) 'Valid package failed'
+    Assert ($r.Valid -and $r.Files -eq @(Get-SentinelPackageFiles).Count+8) 'Valid package failed'
     $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($bootstrap,[ref]$tokens,[ref]$errors)
     Assert ($errors.Count -eq 0) 'Bootstrap syntax failure'
     $imports=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst] -and $n.InvocationOperator -eq 'Dot'},$true))

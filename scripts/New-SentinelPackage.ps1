@@ -16,7 +16,7 @@ if($CertificateThumbprint) {
 }
 New-Item -ItemType Directory -Path $OutputDirectory | Out-Null
 $files=@()
-foreach($name in @((Get-SentinelPackageFiles)+@('README.md','README_JP.txt','CHANGELOG.txt','docs/OPERATIONS_JP.md','docs/PILOT_JP.md','docs/REPOSITORY_JP.md','docs/SECURITY_JP.md'))) {
+foreach($name in @((Get-SentinelPackageFiles)+@('README.md','README_JP.txt','CHANGELOG.txt','docs/OPERATIONS_JP.md','docs/PILOT_JP.md','docs/REPOSITORY_JP.md','docs/SECURITY_JP.md','docs/EVALUATION_JP.md'))) {
     $source=Get-SentinelPackagePath $Root $name
     $destination=Join-Path $OutputDirectory $name
     New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
