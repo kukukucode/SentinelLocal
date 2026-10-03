@@ -5,6 +5,7 @@ $repo=Split-Path -Parent $PSScriptRoot
 . (Join-Path $repo 'src\SysmonMonitoring.ps1')
 . (Join-Path $repo 'tools\sysmon\SysmonSetup.ps1')
 . (Join-Path $repo 'tools\evaluation\DurableObservation.ps1')
+. (Join-Path $repo 'tools\evaluation\BenignBenchmark.ps1')
 $principal=[Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
 if(-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){throw 'Real Sysmon integration requires an administrator CI token.'}
 if(Test-Path $ScratchRoot){throw 'Scratch directory exists.'}
@@ -51,6 +52,9 @@ try {
     $packet=[pscustomobject]@{Kind='BenignObservationPacket';CommandsSucceeded=$true;Root=$root;Trials=@($trials | ForEach-Object {[pscustomobject]@{Id=$_.Id;ProcessId=$_.ProcessId;ExecutablePath=$_.Image;SHA256=$_.SHA256;ProcessCreatedAt=$_.ProcessCreatedAt;Arguments=$_.Arguments}})}
     $proof=Get-SentinelDurableObservation $packet
     if(-not $proof.Complete){throw 'Durable proof did not match all three native process creation times and command arguments.'}
+    foreach($trial in $packet.Trials){$trial | Add-Member NoteProperty StartedAt (@($trials | Where-Object Id -eq $trial.Id)[0].StartedAt.ToString('o'));$trial | Add-Member NoteProperty ObservationEndedAt ([datetimeoffset]::Now.AddSeconds(120).ToString('o'))}
+    $measurement=Get-SentinelBenchmarkSummary $packet.Trials $records $true
+    if(-not $measurement.ObservationValid -or $measurement.CapturedTrials -ne 3 -or $measurement.CaptureFraction -ne 1 -or $measurement.DetectionPerformanceMeasured){throw 'Real Sysmon measurement matching failed or claimed malware efficacy.'}
     if(-not (Get-SentinelLogVerification (Join-Path $root 'logs\process-events.jsonl')).Valid){throw 'Recorded identity chain failed.'}
     $matched | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $ScratchRoot 'captured-processes.json') -Encoding UTF8
     $results+=@([pscustomobject]@{Test='Real Sysmon retains complete metadata for three exited Windows commands';Passed=$true;Detail='3/3; no live CIM metadata lookup or Defender scans';Version=$installed.Binary.Version})

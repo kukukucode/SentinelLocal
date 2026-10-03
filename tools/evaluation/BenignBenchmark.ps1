@@ -2,7 +2,8 @@
 . (Join-Path $PSScriptRoot 'Evaluation.ps1')
 
 function Get-SentinelBenchmarkHealth([string]$Root,$Config) {
-    $started=[datetimeoffset]::Now;$errors=@();$components=@()
+    $started=[datetimeoffset]::Now;$errors=@();$components=@();$defender=$null
+    $taskNames=@{'Watcher.ps1'='SentinelLocal Watcher';'ResponseWorker.ps1'='SentinelLocal Response Worker';'IntegrityMonitor.ps1'='SentinelLocal Integrity Monitor'}
     foreach($spec in @(@('watcher-heartbeat.json','WatcherProcessId','Watcher.ps1',$Config.HeartbeatStaleSeconds),@('response-worker-heartbeat.json','ResponseWorkerProcessId','ResponseWorker.ps1',$Config.ResponseWorkerHeartbeatStaleSeconds),@('integrity-monitor-heartbeat.json','IntegrityMonitorProcessId','IntegrityMonitor.ps1',$Config.SelfDefense.HeartbeatStaleSeconds))){
         try {
             $beat=Get-Content (Join-Path $Root ('state\'+$spec[0])) -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -14,6 +15,8 @@ function Get-SentinelBenchmarkHealth([string]$Root,$Config) {
             if($age -lt -5 -or $age -gt [int]$spec[3]){throw 'Heartbeat is stale or in the future.'}
             $statuses=if($spec[2] -eq 'ResponseWorker.ps1'){@('Idle','Busy')}else{@('Running')}
             if($beat.Status -notin $statuses){throw 'Component is not running.'}
+            $task=Get-EvaluationRuntimeTask $taskNames[$spec[2]]
+            if($task.State -ne 'Running' -or -not $task.Settings.Enabled -or -not (Test-SentinelTaskDefinition $task $Root $taskNames[$spec[2]])){throw 'Expected SYSTEM startup task is disabled stopped or modified.'}
             if($spec[2] -eq 'Watcher.ps1' -and $beat.ProcessMonitorMode -ne 'Sysmon'){throw 'Watcher process source is not Sysmon.'}
             if($beat.Status -eq 'Busy'){
                 $elapsed=($now-[datetimeoffset]$beat.RequestStartedAt).TotalSeconds
@@ -23,7 +26,8 @@ function Get-SentinelBenchmarkHealth([string]$Root,$Config) {
         }catch{$errors+=@($spec[2]+': '+$_.Exception.Message)}
     }
     try {if((Get-FileHash (Join-Path $Root 'Config.json')).Hash -ne $script:BenchmarkConfigHash){throw 'Configuration changed.'};[void](Get-EvaluationSysmonService)}catch{$errors+=@($_.Exception.Message)}
-    return [pscustomobject]@{StartedAt=$started.ToString('o');EndedAt=[datetimeoffset]::Now.ToString('o');Healthy=($errors.Count -eq 0);Components=$components;Errors=$errors}
+    try {$defender=Get-EvaluationDefenderState;if($defender.Mode -ne 'Normal' -or -not $defender.Antivirus -or -not $defender.RealTime -or -not $defender.Behavior){throw 'Defender active protection is not healthy.'}}catch{$errors+=@($_.Exception.Message)}
+    return [pscustomobject]@{StartedAt=$started.ToString('o');EndedAt=[datetimeoffset]::Now.ToString('o');Healthy=($errors.Count -eq 0);Components=$components;Defender=$defender;Errors=$errors}
 }
 
 function Get-SentinelBenchmarkSummary($Trials,$Records,[bool]$ObservationValid) {
@@ -45,6 +49,12 @@ function Get-SentinelBenchmarkSummary($Trials,$Records,[bool]$ObservationValid) 
     $ambiguous=@($rows | Where-Object State -eq Ambiguous).Count
     $valid=$ObservationValid -and @($Trials).Count -gt 0 -and $ambiguous -eq 0 -and @($captured | ForEach-Object {$_.ProcessGuid} | Sort-Object -Unique).Count -eq $captured.Count
     return [pscustomobject]@{ObservationValid=$valid;TrialCount=@($Trials).Count;CapturedTrials=$captured.Count;NotCapturedTrials=@($rows | Where-Object State -eq NotCapturedInWindow).Count;AmbiguousTrials=$ambiguous;CaptureFraction=$(if($valid){Get-EvaluationRate $captured.Count @($Trials).Count}else{$null});PersistDelaySeconds=$(if($valid){Get-EvaluationLatency @($captured | ForEach-Object {$_.PersistDelaySeconds})}else{Get-EvaluationLatency @()});SysmonDelaySeconds=$(if($valid){Get-EvaluationLatency @($captured | ForEach-Object {$_.SysmonDelaySeconds})}else{Get-EvaluationLatency @()});Trials=$rows;DetectionPerformanceMeasured=$false;AlertReviewRequired=$true;FalsePositiveRate=$null;MalwareDetectionRate=$null;TimeToDetect=$null;AttackCoverage=$null}
+}
+
+function Assert-SentinelBenchmarkTelemetryWindow($SourceEvents,$Alerts,$Errors,[datetimeoffset]$Start,[datetimeoffset]$End) {
+    if(@($SourceEvents | Where-Object {$_.EventId -eq 255 -and [datetimeoffset]$_.EventTime -ge $Start -and [datetimeoffset]$_.EventTime -le $End}).Count){throw 'Sysmon reported a provider error in the observation window.'}
+    if(@($Alerts | Where-Object {$_.Type -eq 'EventLogCursorReset' -and $_.Log -eq 'Sysmon' -and [datetimeoffset]$_.Timestamp -ge $Start -and [datetimeoffset]$_.Timestamp -le $End}).Count){throw 'Sysmon event-log continuity was lost during observation.'}
+    if(@($Errors | Where-Object {$_.Component -eq 'Sysmon' -and [datetimeoffset]$_.Timestamp -ge $Start -and [datetimeoffset]$_.Timestamp -le $End}).Count){throw 'Sentinel reported a Sysmon read/persistence failure during observation.'}
 }
 
 function Invoke-SentinelBenignBenchmark([string]$Root,[string]$OutputDirectory,[int]$Rounds=10,[int]$ObservationSeconds=120) {
@@ -103,7 +113,10 @@ function Invoke-SentinelBenignBenchmark([string]$Root,[string]$OutputDirectory,[
         if(-not (Get-SentinelLogVerification $path).Valid){throw 'Process snapshot verification failed.'}
         $records=@(Get-Content $path -Encoding UTF8 | ForEach-Object {$_ | ConvertFrom-Json})
         $source=@(Get-Content (Join-Path $snapshot 'logs\sysmon-events.jsonl') -Encoding UTF8 | ForEach-Object {$_ | ConvertFrom-Json})
-        if($windowStart -and @($source | Where-Object {$_.EventId -eq 255 -and [datetimeoffset]$_.EventTime -ge $windowStart -and [datetimeoffset]$_.EventTime -le $windowEnd}).Count){throw 'Sysmon reported a provider error in the observation window.'}
+        $alerts=@(Get-Content (Join-Path $snapshot 'logs\alerts.jsonl') -Encoding UTF8 -ErrorAction Stop | ForEach-Object {$_ | ConvertFrom-Json})
+        $sourceErrors=@();$errorPath=Join-Path $snapshot 'logs\errors.jsonl'
+        if(Test-Path $errorPath){$sourceErrors=@(Get-Content $errorPath -Encoding UTF8 -ErrorAction Stop | ForEach-Object {$_ | ConvertFrom-Json})}
+        if($windowStart){Assert-SentinelBenchmarkTelemetryWindow $source $alerts $sourceErrors $windowStart $windowEnd}
         [void](Get-EvaluationEventChannel 'Microsoft-Windows-Windows Defender/Operational')
         if($windowStart){
             try{$native=@(Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Windows Defender/Operational';StartTime=$windowStart.LocalDateTime;EndTime=$windowEnd.LocalDateTime} -MaxEvents 10001 -ErrorAction Stop)}catch{if($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*'){throw}}

@@ -34,22 +34,38 @@ Test 'Replay of the same provider event is deduplicated but distinct GUID ambigu
     Assert (-not $summary.ObservationValid -and $null -eq $summary.CaptureFraction -and $summary.AmbiguousTrials -eq 1) 'Distinct identities silently merged.'
 }
 function Get-EvaluationRuntimeProcess([int]$ProcessIdValue){$script:Processes[$ProcessIdValue]}
+Test 'Source errors and cleared cursors invalidate observation while unrelated maintenance noise does not' {
+    $start=[datetimeoffset]'2026-10-03T00:00:00Z';$end=$start.AddSeconds(120);$timestamp=$start.AddSeconds(20).ToString('o')
+    Refused {Assert-SentinelBenchmarkTelemetryWindow @([pscustomobject]@{EventId=255;EventTime=$timestamp}) @() @() $start $end}
+    Refused {Assert-SentinelBenchmarkTelemetryWindow @() @([pscustomobject]@{Type='EventLogCursorReset';Log='Sysmon';Timestamp=$timestamp}) @() $start $end}
+    Refused {Assert-SentinelBenchmarkTelemetryWindow @() @() @([pscustomobject]@{Component='Sysmon';Timestamp=$timestamp}) $start $end}
+    Assert-SentinelBenchmarkTelemetryWindow @() @() @([pscustomobject]@{Component='Firewall';Timestamp=$timestamp}) $start $end
+    Assert-SentinelBenchmarkTelemetryWindow @([pscustomobject]@{EventId=255;EventTime=$start.AddSeconds(-20).ToString('o')}) @() @() $start $end
+}
 function Get-EvaluationSysmonService{if($script:ServiceStopped){throw 'Source stopped'};return @('Sysmon64')}
+function Get-EvaluationRuntimeTask([string]$Name){$script:Tasks[$Name]}
+function Get-EvaluationDefenderState{[pscustomobject]@{Mode='Normal';Antivirus=$true;RealTime=(-not $script:DefenderStopped);Behavior=$true;EngineVersion='Fixture';SignatureVersion='Fixture'}}
 Test 'Health sampling validates live component identity freshness worker time and configuration' {
     $root=Join-Path $ScratchRoot 'health';New-Item -ItemType Directory -Path (Join-Path $root 'state') | Out-Null
     Copy-Item (Join-Path $repo 'config\Config.json') (Join-Path $root 'Config.json')
     $config=Get-Content (Join-Path $root 'Config.json') -Raw | ConvertFrom-Json;$script:BenchmarkConfigHash=(Get-FileHash (Join-Path $root 'Config.json')).Hash
-    $script:Processes=@{};$script:ServiceStopped=$false;$i=1
+    $script:Processes=@{};$script:Tasks=@{};$script:ServiceStopped=$false;$script:DefenderStopped=$false;$i=1
     foreach($spec in @(@('watcher-heartbeat.json','WatcherProcessId','Watcher.ps1','Running'),@('response-worker-heartbeat.json','ResponseWorkerProcessId','ResponseWorker.ps1','Busy'),@('integrity-monitor-heartbeat.json','IntegrityMonitorProcessId','IntegrityMonitor.ps1','Running'))){
         $beat=[ordered]@{Version=$config.Version;Status=$spec[3];LastUpdated=[datetimeoffset]::Now.ToString('o');RequestStartedAt=[datetimeoffset]::Now.ToString('o');ProcessMonitorMode='Sysmon'};$beat[$spec[1]]=$i;Write-SentinelAtomicJson (Join-Path $root ('state\'+$spec[0])) $beat
         $script:Processes[$i]=[pscustomobject]@{ProcessId=$i;ExecutablePath=(Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe');CommandLine=('-File "'+(Join-Path $root $spec[2])+'" -Root "'+$root+'"');CreationDate=[datetime]::Now.AddMinutes(-10)};$i++
+        $taskNames=@{'Watcher.ps1'='SentinelLocal Watcher';'ResponseWorker.ps1'='SentinelLocal Response Worker';'IntegrityMonitor.ps1'='SentinelLocal Integrity Monitor'}
+        $script:Tasks[$taskNames[$spec[2]]]=[pscustomobject]@{State='Running';Settings=[pscustomobject]@{Enabled=$true;DisallowStartIfOnBatteries=$false;StopIfGoingOnBatteries=$false};Actions=@([pscustomobject]@{Execute=(Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe');Arguments=('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "'+(Join-Path $root $spec[2])+'" -Root "'+$root+'"');WorkingDirectory=''});Principal=[pscustomobject]@{UserId='SYSTEM';RunLevel='Highest';LogonType='ServiceAccount'};Triggers=@([pscustomobject]@{CimClass=[pscustomobject]@{CimClassName='MSFT_TaskBootTrigger'};Enabled=$true;StartBoundary='';EndBoundary='';Delay='';Repetition=[pscustomobject]@{Interval='';Duration=''}})}
     }
     Assert (Get-SentinelBenchmarkHealth $root $config).Healthy 'Healthy running fixture rejected.'
     $script:Processes[1].CreationDate=[datetime]::Now.AddMinutes(1)
     Assert (-not (Get-SentinelBenchmarkHealth $root $config).Healthy) 'Reused PID accepted.'
     $script:Processes[1].CreationDate=[datetime]::Now.AddMinutes(-10);$script:ServiceStopped=$true
     Assert (-not (Get-SentinelBenchmarkHealth $root $config).Healthy) 'Stopped Sysmon accepted.'
-    $script:ServiceStopped=$false;Add-Content (Join-Path $root 'Config.json') ' '
+    $script:ServiceStopped=$false;$script:DefenderStopped=$true
+    Assert (-not (Get-SentinelBenchmarkHealth $root $config).Healthy) 'Disabled Defender accepted.'
+    $script:DefenderStopped=$false;$script:Tasks['SentinelLocal Watcher'].State='Ready'
+    Assert (-not (Get-SentinelBenchmarkHealth $root $config).Healthy) 'Stopped task accepted.'
+    $script:Tasks['SentinelLocal Watcher'].State='Running';Add-Content (Join-Path $root 'Config.json') ' '
     Assert (-not (Get-SentinelBenchmarkHealth $root $config).Healthy) 'Changed configuration accepted.'
 }
 Test 'Unready or disabled-Sysmon preflight starts no commands and invalid paths are refused' {
