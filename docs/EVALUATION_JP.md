@@ -31,6 +31,8 @@ Get-Content .\reports\evaluation-readiness\readiness.json -Raw -Encoding UTF8 | 
 
 この診断は既存導入の信頼性を認証するものではありません。導入は独立Bootstrapによる検証手順を使用してください。診断結果にPCのパスやローカル状態が含まれるため、reports/内に保存し、公開リポジトリには登録しません。
 
+ログの検証は常駐側と同じ排他ロックを使います。昇格した運用では、ロックの作成時にSYSTEMとAdministratorsだけへアクセスを許可します。旧版が作ったロックの権限は、そのオブジェクトが生存している間は変わりません。Global\SentinelLocalLog_*へのアクセス拒否が出る旧版は、検証済みパッケージで更新し、常駐3コンポーネントを再起動してください。診断を回避したり、一般ユーザーにログやロックの権限を広げたりせず、更新後に新しい出力フォルダーで診断・観測をやり直します。
+
 ## 最初の無害な実行記録
 
 管理者PowerShellで、レビューしたソースリポジトリから実行します。開始前の診断が全項目Passの場合だけ、署名が有効なMicrosoftのSystem32\hostname.exe、whoami.exe、cmd.exe（/d /c echo SentinelLocal benign smoke）を起動します。コマンドごとに10秒の実行上限と終了後5秒の観測窓を設けます。Response WorkerのBusyだけが残る場合は、開始前・終了後とも最大60秒を目安に待機状態を再確認します。それ以外の失敗では待機を続けません。任意のコマンドや検体の指定は受け付けません。
@@ -42,6 +44,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\evaluation\Start
 ```
 
 出力先は新規フォルダーとし、導入先の内部・既存フォルダー・接合点経由の出力を拒否します。readiness-before.json、commands.json、readiness-after.json、observation.jsonを保存します。前後の診断不成立、設定hashの変更、コマンド失敗は成功扱いにしません。個別の実行記録には実行ファイルの署名者とSHA-256、PIDと生成時刻、実行開始・終了・観測終了、標準出力を含みます。PC名とユーザー名が記録されるため、公開Gitには登録しないでください。
+
+開始前・終了後の診断に失敗した場合は、未確認・失敗した項目とその理由を実行画面にも表示します。開始前に止まった観測では試験コマンドは実行されず、commands.jsonとreadiness-after.jsonは作成されません。
 
 observation.jsonは集計用Schema 1とは別の観測パケットです。常にReviewRequired=true、PerformanceMeasured=falseとします。実行成功は、監視がプロセスを観測したことや無警告を証明しません。短時間のプロセスはCIMのメタデータ取得から漏れる場合があります。開始・終了の正常性確認だけでは観測窓全体の健全性も保証できません。
 
