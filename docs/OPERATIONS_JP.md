@@ -103,6 +103,24 @@ Windows Event Forwardingを既に利用している環境では、Applicationロ
 
 Sysmonは任意の依存関係です。自動ダウンロード・インストール・設定変更はしません。既に導入・設定済みのSysmonを使用する場合、`Config.json`の`Sysmon.Enabled`をtrueにし、整合性基準を更新してSentinelLocalタスクを再起動してください。
 
+有効時のプロセス監視源はSysmonです。サービスやチャネルが利用できなければWatcherの起動を失敗として扱います。CIMへ自動で戻すことはありません。Heartbeatの`ProcessMonitorMode=Sysmon`と測定前診断で確認できます。無効時は従来のCIM監視を使用します。
+
+イベント1の保存済み情報から、パス・コマンドライン・生成時刻・親PID・ProcessGuid・SHA256を`logs/process-events.jsonl`へ記録します。ゼロ点の正常コマンドも記録するため、短時間で終了したコマンドを後から確認できます。欠落項目は`MetadataComplete=false`になり、Sysmonのエラーイベント255はHIGH警告です。記録があることはマルウェア検知や阻止を意味しません。通常の容量管理・監査出力も適用されます。
+
+新規導入の補助ツールはAMD64 Windows向けです。[Microsoft公式Sysmon](https://learn.microsoft.com/en-us/sysinternals/downloads/sysmon)のバイナリを準備し、独立に確認したSHA256を渡します。ツールはハッシュ・有効なMicrosoft署名・製品名を検証し、管理者とSYSTEMだけが書き込める場所へコピーして再検証します。既存Sysmonは上書きしません。適用するとMicrosoftのサービスとドライバーをインストールし、全プロセス作成のコマンドラインとSHA256、WMI永続化、プロセス改変を収集します。コマンドラインに含まれる引数もログに残ります。
+
+```powershell
+# リポジトリのルートから実行。まず変更内容を表示するだけ。
+.\tools\sysmon\Install-SentinelSysmon.ps1 -BinaryPath $sysmonExe -ExpectedSHA256 $sysmonSha256
+# MicrosoftのEULAを確認後、管理者PowerShellで明示的に適用する。
+.\tools\sysmon\Install-SentinelSysmon.ps1 -BinaryPath $sysmonExe -ExpectedSHA256 $sysmonSha256 -Apply -AcceptEula
+# Sysmonを導入した後、通常の検証済み設定変更で有効化する。
+'{"Sysmon":{"Enabled":true}}' | Set-Content .\sysmon-policy.json -Encoding UTF8
+.\scripts\Set-SentinelPolicy.ps1 -PolicyPath .\sysmon-policy.json -Reason 'Enable durable process observation' -RestartTasks
+```
+
+既存Sysmonを使う場合も、イベント1とSHA256の収集が必要です。この導入構成はネットワーク・DNSの広範な収集を有効化しません。CIは破棄可能なWindows VMだけで実Sysmonを導入し、終了済みのhostname・whoami・cmdの3件が取得できるかを検証してからアンインストールします。Defenderの実スキャンや実検体の評価とは別の試験です。
+
 イベント1（プロセス作成）、3（TCP/UDP通信）、19〜21（WMI永続化）、22（DNS）、25（プロセス改変）を`sysmon-events.jsonl`へ取り込みます。通信などのイベントを得るには、Sysmon側でも該当収集を有効化する必要があります。プロセス作成イベントのコマンドラインから、参照されたローカルスクリプトを追加スキャンに渡します。
 
 WMIのプロセス開始通知でも、絶対パスで指定されたps1/psm1/vbs/js/hta/bat/cmdを別の対象としてスキャンします。`ScanReferencedScripts`は既定trueで、ヒューリスティックスコアが低い通常のスクリプトホストでも、参照されたローカルスクリプトをDefenderへ渡します。この追加スキャンは悪意の判定やプロセスの強制終了を意味しません。

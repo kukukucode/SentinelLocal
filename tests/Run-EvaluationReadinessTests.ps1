@@ -24,6 +24,7 @@ function Get-EvaluationRuntimeTask([string]$Name) {
     return $script:Tasks[$Name]
 }
 function Get-EvaluationDefenderState { return $script:Defender }
+function Get-EvaluationSysmonService { if($script:SysmonError){throw 'Sysmon stopped (fixture)'};return @('Sysmon64') }
 function Get-EvaluationEventChannel([string]$Name) {
     if($script:ChannelError -or ($script:SysmonError -and $Name -like '*Sysmon*')) { throw 'Event channel access denied (fixture)' }
     $script:Channels.Add($Name)
@@ -193,6 +194,16 @@ Run-Test 'Passive Defender and enabled but unreadable Sysmon prevent readiness' 
     $config=Get-Content $path -Raw | ConvertFrom-Json;$config.Sysmon.Enabled=$true;Write-SentinelAtomicJson $path $config
     $script:SysmonError=$true
     Assert (-not (Get-SentinelEvaluationReadiness $root $now).ReadyForBenignTrials) 'Unreadable required Sysmon channel accepted'
+}
+Run-Test 'Enabled Sysmon requires the running source and Watcher mode acknowledgement' {
+    $root=Fixture 'sysmon-source';$path=Join-Path $root 'Config.json'
+    $config=Get-Content $path -Raw | ConvertFrom-Json;$config.Sysmon.Enabled=$true;Write-SentinelAtomicJson $path $config
+    Assert (-not (Get-SentinelEvaluationReadiness $root $now).ReadyForBenignTrials) 'Old CIM-only Watcher passed as Sysmon.'
+    $path=Join-Path $root 'state\watcher-heartbeat.json';$heartbeat=Get-Content $path -Raw | ConvertFrom-Json
+    $heartbeat | Add-Member NoteProperty ProcessMonitorMode Sysmon;Write-SentinelAtomicJson $path $heartbeat
+    Assert (Get-SentinelEvaluationReadiness $root $now).ReadyForBenignTrials 'Healthy Sysmon source rejected.'
+    $script:SysmonError=$true
+    Assert (-not (Get-SentinelEvaluationReadiness $root $now).ReadyForBenignTrials) 'Stopped source accepted.'
 }
 Run-Test 'CLI writes an unready report outside the installation and returns exit code two' {
     $output=Join-Path $ScratchRoot 'cli-report';$missing=Join-Path $ScratchRoot 'cli-not-installed'

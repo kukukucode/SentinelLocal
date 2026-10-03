@@ -113,6 +113,7 @@ function Write-Heartbeat {
         StartedAt = $StartedAt.ToString("o")
         LastUpdated = (Get-Date).ToString("o")
         LastDefenderRecordId = $LastDefenderRecordId
+        ProcessMonitorMode = $processMonitorMode
     }
     try {
         Write-SentinelAtomicJson $heartbeatPath $heartbeat
@@ -948,7 +949,7 @@ try {
     Write-TextLog "SentinelLocal v1.2.1 watcher started."
 
     $startupPhase='Register process-start monitor'
-    Register-CimIndicationEvent -Query "SELECT * FROM Win32_ProcessStartTrace" -SourceIdentifier "SentinelLocal.ProcessStart" -ErrorAction Stop | Out-Null
+    $processMonitorMode=Initialize-SentinelProcessMonitor $config
 
     $startupPhase='Capture initial persistence snapshot'
     $initialSnapshot=Get-PersistenceSnapshot
@@ -993,7 +994,8 @@ try {
 
 while ($true) {
     try {
-        $processEvent=Wait-Event -SourceIdentifier "SentinelLocal.ProcessStart" -Timeout ([int]$config.PollSeconds)
+        if($processMonitorMode -eq 'Sysmon') {Start-Sleep -Seconds ([int]$config.PollSeconds);$processEvent=$null}
+        else {$processEvent=Wait-Event -SourceIdentifier "SentinelLocal.ProcessStart" -Timeout ([int]$config.PollSeconds)}
         if ($processEvent) {
             Invoke-SentinelVolatileObservation -Root $Root -Event $processEvent -Handler {
             param($processEvent)

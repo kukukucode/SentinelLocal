@@ -8,6 +8,11 @@ function Get-EvaluationRuntimeProcess([int]$ProcessIdValue) {
 function Get-EvaluationCurrentTime {
     return [datetimeoffset]::Now
 }
+function Get-EvaluationSysmonService {
+    $running=@(Get-Service -Name Sysmon,Sysmon64 -ErrorAction SilentlyContinue | Where-Object Status -eq Running)
+    if(-not $running.Count) { throw 'The required Sysmon service is not running.' }
+    return @($running.Name)
+}
 function Get-EvaluationRuntimeTask([string]$Name) {
     return Get-ScheduledTask -TaskName $Name -TaskPath '\' -ErrorAction Stop
 }
@@ -94,6 +99,7 @@ function Get-SentinelEvaluationReadiness([string]$Root='C:\ProgramData\SentinelL
             $heartbeat=Get-Content -LiteralPath (Join-Path $rootPath ('state\'+$component.File)) -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
             if([string]$heartbeat.Version -cne [string]$config.Version) { throw 'Heartbeat version differs from configuration.' }
             if([string]$heartbeat.Status -cnotin $component.Statuses) { throw ('Component status is "'+[string]$heartbeat.Status+'"; expected '+($component.Statuses -join ', ')+'. Wait for a healthy measurement baseline.') }
+            if($component.Name -eq 'Watcher' -and $config.Sysmon.Enabled -and [string]$heartbeat.ProcessMonitorMode -cne 'Sysmon') { throw 'Watcher has not confirmed Sysmon as its process source; upgrade/restart the reviewed payload.' }
             if([string]$heartbeat.LastUpdated -notmatch '(Z|[+-]\d{2}:\d{2})$') { throw 'Heartbeat needs an explicit timezone.' }
             $updated=[datetimeoffset]::Parse([string]$heartbeat.LastUpdated,[Globalization.CultureInfo]::InvariantCulture)
             # Live probes may take seconds and heartbeats continue updating.
@@ -125,6 +131,7 @@ function Get-SentinelEvaluationReadiness([string]$Root='C:\ProgramData\SentinelL
     Probe 'Defender active protection' { Get-EvaluationDefenderState } {param($value) $value.Mode -eq 'Normal' -and $value.Antivirus -and $value.RealTime -and $value.Behavior} 'Confirm Defender active protection and record its versions before the run.'
     Probe 'Defender event channel' { Get-EvaluationEventChannel 'Microsoft-Windows-Windows Defender/Operational' } {param($value) $value.Enabled} 'Read access to the enabled channel is required; inaccessible is not zero detections.'
     if($config -and $config.Sysmon.Enabled) {
+        Probe 'Sysmon service' { @(Get-EvaluationSysmonService) } {param($value) @($value).Count -gt 0} 'Sysmon must be running when it is the process observation source.'
         Probe 'Sysmon event channel' { Get-EvaluationEventChannel 'Microsoft-Windows-Sysmon/Operational' } {param($value) $value.Enabled} 'When Sysmon monitoring is enabled, its event channel must also be readable.'
     }
     return [pscustomobject]@{

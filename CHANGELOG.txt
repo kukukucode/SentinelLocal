@@ -1,4 +1,6 @@
 Unreleased - evaluation foundation (2026-10-03)
+- Sysmon-enabled Watcher uses durable creation telemetry as its process source; preserves command line, creation time, ProcessGuid and SHA256 after exit, logs incomplete records/provider errors, and fails startup rather than silently falling back to CIM.
+- Explicit Microsoft-signature/hash-checked Sysmon deployment helper and real exited-process integration on disposable Windows CI VMs; readiness requires the running service and source acknowledgement. No malware efficacy rates are implied.
 - Atomic JSON writes use a short independent temporary filename, fixing deep audit-export destinations whose checkpoint temp paths exceeded legacy Windows path limits.
 - Log mutexes atomically grant SYSTEM and elevated administrators shared access; CI checks both creator accounts. Benign pre/postflight failures print their diagnostic reasons.
 - Record three fixed benign Windows command launches with signed-file/process identity and pre/postflight; unreviewed observations never become measured rates automatically.

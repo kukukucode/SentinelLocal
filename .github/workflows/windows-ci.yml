@@ -65,6 +65,14 @@ jobs:
         run: |
           git diff --check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Durable process identity regressions
+        run: |
+          & .\tests\Run-SysmonProcessTests.ps1 -ScratchRoot (Join-Path $env:RUNNER_TEMP 'SentinelLocal-sysmon-process-tests')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Real Sysmon process creation integration (ephemeral CI VM)
+        run: |
+          & .\tests\Run-SysmonIntegration.ps1 -ScratchRoot (Join-Path $env:RUNNER_TEMP 'SentinelLocal-sysmon-integration')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -78,5 +86,8 @@ jobs:
             ${{ runner.temp }}/SentinelLocal-evaluation-readiness-tests/test-results.json
             ${{ runner.temp }}/SentinelLocal-watcher-startup-tests/test-results.json
             ${{ runner.temp }}/SentinelLocal-benign-observation-tests/test-results.json
+            ${{ runner.temp }}/SentinelLocal-sysmon-process-tests/test-results.json
+            ${{ runner.temp }}/SentinelLocal-sysmon-integration/test-results.json
+            ${{ runner.temp }}/SentinelLocal-sysmon-integration/captured-processes.json
           if-no-files-found: warn
           retention-days: 14
