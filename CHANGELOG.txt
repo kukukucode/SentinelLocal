@@ -1,4 +1,5 @@
 Unreleased - evaluation foundation (2026-10-03)
+- Benchmark preflight failures retain complete readiness evidence and print specific failed checks without launching commands; preflight-only mode allows diagnosis without trials, even on a healthy baseline.
 - Bounded benign measurement: 30 fixed Windows command launches, 120-second per-process observation windows, sampled runtime/configuration health and audit/Defender evidence collection. Reports scoped capture fraction and ingestion latency only; invalid observation remains N/A and alert attribution requires review.
 - Sysmon-enabled Watcher uses durable creation telemetry as its process source; preserves command line, creation time, ProcessGuid and SHA256 after exit, logs incomplete records/provider errors, and fails startup rather than silently falling back to CIM.
 - Explicit Microsoft-signature/hash-checked Sysmon deployment helper and real exited-process integration on disposable Windows CI VMs; readiness requires the running service and source acknowledgement. No malware efficacy rates are implied.

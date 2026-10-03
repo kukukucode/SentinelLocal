@@ -131,6 +131,12 @@ Sysmon有効の正常な導入で、管理者Windows PowerShell 5.1から次を�
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\evaluation\Start-SentinelBenignBenchmark.ps1
 ```
 
+準備診断が不合格の場合は試行を開始せず、不合格の項目・状態・理由を画面に表示します。出力先のreadiness-before.jsonに診断全体、benchmark.jsonとsummary.mdにPreflightFailedと未測定の結果を保存します。診断自体の例外もUnverifiedとして残します。次の診断専用モードなら、準備が整っていても試験コマンドを起動しません。
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\evaluation\Start-SentinelBenignBenchmark.ps1 -PreflightOnly
+```
+
 hostname・whoami・cmdのechoを各10回、合計30試行に固定します。各試行の観測窓は起動から120秒で、観測窓は重なります。最後の窓が終わるまで待つため実行には数分かかります。試験前後に通常の準備診断を行い、試験中はHeartbeatの鮮度・プロセス実体/引数/生成時刻・SYSTEMタスクの状態/定義・Sysmonサービス・Defenderの保護状態/版・設定ハッシュを定期的に読み取ります。WorkerのBusyは制限時間内なら許容します。サンプリング間隔の目標は5秒で、実際の最大間隔と各確認の開始・終了時刻を保存し、30秒を超えた場合は観測不成立にします。サンプリングは監視の中断が一切なかったことの証明ではありません。
 
 監査スナップショット、ネイティブDefenderイベント、起動記録と監視状態のサンプルを同じ出力フォルダーへ保存します。各プロセスはPID・パス・SHA256・生成時刻・引数・ProcessGuidで照合し、観測窓内に保存された情報だけを取得成功に数えます。同じSysmonイベントの再記録は重複排除し、異なるGUIDの複数候補は未確認です。既知の監視障害、取得不可、設定変更、未完了の試行やSysmonエラーがあれば取得率はN/Aにします。正常な観測で対応する記録がない場合は取得漏れとして数えます。

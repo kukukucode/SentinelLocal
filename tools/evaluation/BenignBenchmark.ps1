@@ -83,7 +83,7 @@ function Export-SentinelBenchmarkSnapshot([string]$Root,[string]$Destination) {
     return $complete
 }
 
-function Invoke-SentinelBenignBenchmark([string]$Root,[string]$OutputDirectory,[int]$Rounds=10,[int]$ObservationSeconds=120) {
+function Invoke-SentinelBenignBenchmark([string]$Root,[string]$OutputDirectory,[int]$Rounds=10,[int]$ObservationSeconds=120,[switch]$PreflightOnly) {
     if($Rounds -lt 1 -or $Rounds -gt 100 -or $ObservationSeconds -lt 60 -or $ObservationSeconds -gt 600){throw 'Rounds must be 1..100 and observation window 60..600 seconds.'}
     $rootPath=[IO.Path]::GetFullPath($Root).TrimEnd('\');$output=[IO.Path]::GetFullPath($OutputDirectory).TrimEnd('\')
     if($output -ieq $rootPath -or $output.StartsWith($rootPath+'\',[StringComparison]::OrdinalIgnoreCase) -or (Test-Path $output)){throw 'Choose a new output folder outside the installation.'}
@@ -91,15 +91,27 @@ function Invoke-SentinelBenignBenchmark([string]$Root,[string]$OutputDirectory,[
         $ancestor=$candidate
         while($ancestor){if((Test-Path $ancestor) -and ((Get-Item -LiteralPath $ancestor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Benchmark paths must not traverse reparse points.'};$parent=Split-Path -Parent $ancestor;if($parent -eq $ancestor){break};$ancestor=$parent}
     }
-    $pre=Wait-SentinelObservationBaseline $rootPath
-    if(-not $pre.ReadyForBenignTrials -or -not $pre.Environment.SysmonEnabled){throw 'A healthy, idle, Sysmon-enabled measurement baseline is required.'}
     New-Item -ItemType Directory -Path $output | Out-Null
+    try {$pre=Wait-SentinelObservationBaseline $rootPath}
+    catch {$pre=[pscustomobject]@{ReadyForBenignTrials=$false;Environment=[pscustomobject]@{SysmonEnabled=$null};Checks=@([pscustomobject]@{Name='Readiness probe';State='Unverified';Value=$_.Exception.Message})}}
     Write-SentinelAtomicJson (Join-Path $output 'readiness-before.json') $pre
+    $plan=[ordered]@{Rounds=$Rounds;TrialCount=$Rounds*3;ObservationSeconds=$ObservationSeconds;TargetSampleIntervalSeconds=5;MaximumSampleGapSeconds=30;Commands=@(Get-SentinelBenignScenarios);Scope='Fixed Windows commands only; overlapping per-process observation windows. Sampled health is not continuous attestation. No Windows configuration changes.'}
+    Write-SentinelAtomicJson (Join-Path $output 'plan.json') $plan
+    $preflightReady=$pre.ReadyForBenignTrials -and $pre.Environment.SysmonEnabled
+    if($PreflightOnly -or -not $preflightReady){
+        $issues=@($pre.Checks | Where-Object {$_.State -ne 'Pass'})
+        $errors=@(foreach($issue in $issues){$value=if($issue.Value -is [string]){$issue.Value}else{ConvertTo-Json -InputObject $issue.Value -Depth 10 -Compress};$issue.Name+' ['+$issue.State+']: '+$value})
+        if(-not $pre.Environment.SysmonEnabled){$errors+=@('The measurement requires SysmonEnabled=true and a verified Sysmon process source.')}
+        if(-not $preflightReady -and -not $errors.Count){$errors+=@('Readiness did not establish a healthy, idle, Sysmon-enabled baseline; see readiness-before.json.')}
+        $status=if($preflightReady){'PreflightPassed'}else{'PreflightFailed'}
+        $packet=[ordered]@{Schema=1;Kind='BenignBenchmarkPacket';Status=$status;CapturedAt=[datetimeoffset]::Now.ToString('o');Root=$rootPath;Environment=$pre.Environment;Plan=$plan;Trials=@();Snapshot=$null;DefenderStatus='NotCollected';HealthSampleCount=0;MaximumSampleGapSeconds=$null;Errors=$errors;Preflight=$pre;Capture=(Get-SentinelBenchmarkSummary @() @() $false);PerformanceMeasured=$false;ReviewRequired=$true;Scope='Preflight only; no trial commands were started and no capture or detection performance was measured.'}
+        Write-SentinelAtomicJson (Join-Path $output 'benchmark.json') $packet
+        [IO.File]::WriteAllLines((Join-Path $output 'summary.md'),@('# SentinelLocal benchmark preflight','',('Status: '+$status),'No trial commands were started. Capture and detection performance: N/A.',('Errors: '+($errors -join '; '))),[Text.UTF8Encoding]::new($true))
+        return [pscustomobject]$packet
+    }
     $config=Get-Content (Join-Path $rootPath 'Config.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     $script:BenchmarkConfigHash=$pre.Environment.ConfigSHA256
     $trials=@();$samples=@();$errors=@();$deadline=$null;$lastSample=[datetimeoffset]::MinValue
-    $plan=[ordered]@{Rounds=$Rounds;TrialCount=$Rounds*3;ObservationSeconds=$ObservationSeconds;TargetSampleIntervalSeconds=5;MaximumSampleGapSeconds=30;Commands=@(Get-SentinelBenignScenarios);Scope='Fixed Windows commands only; overlapping per-process observation windows. Sampled health is not continuous attestation. No Windows configuration changes.'}
-    Write-SentinelAtomicJson (Join-Path $output 'plan.json') $plan
     try {
         for($round=1;$round -le $Rounds;$round++){
             foreach($scenario in Get-SentinelBenignScenarios){

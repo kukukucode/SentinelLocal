@@ -69,14 +69,35 @@ Test 'Health sampling validates live component identity freshness worker time an
     Assert (-not (Get-SentinelBenchmarkHealth $root $config).Healthy) 'Changed configuration accepted.'
 }
 Test 'Unready or disabled-Sysmon preflight starts no commands and invalid paths are refused' {
-    function Wait-SentinelObservationBaseline{[pscustomobject]@{ReadyForBenignTrials=$false;Environment=[pscustomobject]@{SysmonEnabled=$true}}}
-    function Invoke-SentinelBenignCommand{throw 'Must not launch.'}
+    $script:PreflightLaunches=0
+    function Wait-SentinelObservationBaseline{[pscustomobject]@{ReadyForBenignTrials=$false;Environment=[pscustomobject]@{SysmonEnabled=$true};Checks=@([pscustomobject]@{Name='Watcher task';State='Fail';Value=[pscustomobject]@{State='Ready';Enabled=$true}})}}
+    function Invoke-SentinelBenignCommand{$script:PreflightLaunches++;throw 'Must not launch.'}
     $root=Join-Path $ScratchRoot 'health';$output=Join-Path $ScratchRoot 'not-started'
-    Refused {Invoke-SentinelBenignBenchmark $root $output}
-    Assert (-not (Test-Path $output)) 'Preflight failure created measured output.'
+    $packet=Invoke-SentinelBenignBenchmark $root $output
+    $saved=Get-Content (Join-Path $output 'benchmark.json') -Raw | ConvertFrom-Json
+    $readiness=Get-Content (Join-Path $output 'readiness-before.json') -Raw | ConvertFrom-Json
+    Assert ($packet.Status -eq 'PreflightFailed' -and $saved.Trials.Count -eq 0 -and $script:PreflightLaunches -eq 0 -and $saved.Plan.TrialCount -eq 30 -and $null -eq $saved.Capture.CaptureFraction -and -not $saved.PerformanceMeasured) 'Preflight failure launched commands or produced a measured rate.'
+    Assert ($readiness.Checks[0].Value.State -eq 'Ready' -and $packet.Errors[0] -like '*Watcher task*Ready*') 'Specific failure reason was lost.'
+    function Wait-SentinelObservationBaseline{[pscustomobject]@{ReadyForBenignTrials=$true;Environment=[pscustomobject]@{SysmonEnabled=$false};Checks=@()}}
+    $disabled=Invoke-SentinelBenignBenchmark $root (Join-Path $ScratchRoot 'disabled-sysmon')
+    Assert ($disabled.Status -eq 'PreflightFailed' -and $disabled.Errors[0] -like '*SysmonEnabled=true*' -and $script:PreflightLaunches -eq 0) 'Disabled source was accepted or not diagnosed.'
     Refused {Invoke-SentinelBenignBenchmark $root (Join-Path $root 'measurement')}
     Refused {Invoke-SentinelBenignBenchmark $root $output 0 120}
     Refused {Invoke-SentinelBenignBenchmark $root $output 10 5}
+}
+Test 'Healthy preflight-only saves readiness without launching commands or reporting a rate' {
+    $script:PreflightLaunches=0
+    function Wait-SentinelObservationBaseline{[pscustomobject]@{ReadyForBenignTrials=$true;Environment=[pscustomobject]@{SysmonEnabled=$true};Checks=@([pscustomobject]@{Name='Fixture';State='Pass';Value='Verified'})}}
+    function Invoke-SentinelBenignCommand{$script:PreflightLaunches++;throw 'Must not launch.'}
+    $output=Join-Path $ScratchRoot 'preflight-only'
+    $packet=Invoke-SentinelBenignBenchmark (Join-Path $ScratchRoot 'health') $output -PreflightOnly
+    Assert ($packet.Status -eq 'PreflightPassed' -and $packet.Errors.Count -eq 0 -and $script:PreflightLaunches -eq 0 -and $null -eq $packet.Capture.CaptureFraction -and -not (Test-Path (Join-Path $output 'commands.json'))) 'Diagnostic-only run executed trials or produced a rate.'
+}
+Test 'Readiness probe exceptions are preserved as unverified preflight evidence' {
+    function Wait-SentinelObservationBaseline{throw 'Fixture access denied.'}
+    $output=Join-Path $ScratchRoot 'probe-error'
+    $packet=Invoke-SentinelBenignBenchmark (Join-Path $ScratchRoot 'health') $output
+    Assert ($packet.Status -eq 'PreflightFailed' -and $packet.Errors[0] -like '*Readiness probe*Fixture access denied*' -and (Test-Path (Join-Path $output 'readiness-before.json'))) 'Probe exception discarded diagnostics.'
 }
 Test 'Benchmark export verifies copied chains and leaves pending or damaged source logs untouched' {
     $root=Join-Path $ScratchRoot 'export-source';$log=Join-Path $root 'logs\process-events.jsonl'
