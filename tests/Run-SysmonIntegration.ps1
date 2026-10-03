@@ -4,6 +4,7 @@ $repo=Split-Path -Parent $PSScriptRoot
 . (Join-Path $repo 'src\Common.ps1')
 . (Join-Path $repo 'src\SysmonMonitoring.ps1')
 . (Join-Path $repo 'tools\sysmon\SysmonSetup.ps1')
+. (Join-Path $repo 'tools\evaluation\DurableObservation.ps1')
 $principal=[Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
 if(-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){throw 'Real Sysmon integration requires an administrator CI token.'}
 if(Test-Path $ScratchRoot){throw 'Scratch directory exists.'}
@@ -30,7 +31,7 @@ try {
             $start=[datetimeoffset]::Now;[void]$child.Start();$stdout=$child.StandardOutput.ReadToEndAsync();$stderr=$child.StandardError.ReadToEndAsync()
             if(-not $child.WaitForExit(10000)){$child.Kill();$child.WaitForExit();throw 'Benign integration command timed out.'}
             $child.WaitForExit();if($child.ExitCode -ne 0){throw 'Benign integration command failed.'}
-            $trials+=@([pscustomobject]@{Id=$command[0];ProcessId=$child.Id;Image=$info.FileName;SHA256=(Get-FileHash $info.FileName).Hash;StartedAt=$start;EndedAt=[datetimeoffset]::Now})
+            $trials+=@([pscustomobject]@{Id=$command[0];ProcessId=$child.Id;Image=$info.FileName;SHA256=(Get-FileHash $info.FileName).Hash;StartedAt=$start;EndedAt=[datetimeoffset]::Now;ProcessCreatedAt=$child.StartTime.ToUniversalTime().ToString('o');Arguments=$command[1]})
         } finally {$child.Dispose()}
     }
     # Every process has already exited before the reader starts. The test fails
@@ -47,6 +48,9 @@ try {
         if($matched.Count -eq 3){break};Start-Sleep -Milliseconds 500
     } while($timer.Elapsed.TotalSeconds -lt 30)
     if($matched.Count -ne 3){throw ('Only '+$matched.Count+'/3 exited commands retained complete metadata.')}
+    $packet=[pscustomobject]@{Kind='BenignObservationPacket';CommandsSucceeded=$true;Root=$root;Trials=@($trials | ForEach-Object {[pscustomobject]@{Id=$_.Id;ProcessId=$_.ProcessId;ExecutablePath=$_.Image;SHA256=$_.SHA256;ProcessCreatedAt=$_.ProcessCreatedAt;Arguments=$_.Arguments}})}
+    $proof=Get-SentinelDurableObservation $packet
+    if(-not $proof.Complete){throw 'Durable proof did not match all three native process creation times and command arguments.'}
     if(-not (Get-SentinelLogVerification (Join-Path $root 'logs\process-events.jsonl')).Valid){throw 'Recorded identity chain failed.'}
     $matched | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $ScratchRoot 'captured-processes.json') -Encoding UTF8
     $results+=@([pscustomobject]@{Test='Real Sysmon retains complete metadata for three exited Windows commands';Passed=$true;Detail='3/3; no live CIM metadata lookup or Defender scans';Version=$installed.Binary.Version})
