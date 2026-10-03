@@ -4,7 +4,10 @@ function Write-SentinelAtomicJson {
     param([string]$Path,$Data)
     $parent = Split-Path -Parent $Path
     New-Item -ItemType Directory -Path $parent -Force | Out-Null
-    $temp = $Path + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+    # Keep the random temporary name independent of the target's basename.
+    # Appending to a long checkpoint name can exceed legacy .NET MAX_PATH even
+    # when the final destination is valid. The same parent preserves atomicity.
+    $temp = Join-Path $parent ('.sl-' + [guid]::NewGuid().ToString('N') + '.tmp')
     try {
         $encoding=[System.Text.UTF8Encoding]::new($true)
         $bytes = $encoding.GetPreamble() + $encoding.GetBytes((ConvertTo-Json -InputObject $Data -Depth 20 -Compress))

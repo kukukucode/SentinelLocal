@@ -1,4 +1,5 @@
 Unreleased - evaluation foundation (2026-10-03)
+- Atomic JSON writes use a short independent temporary filename, fixing deep audit-export destinations whose checkpoint temp paths exceeded legacy Windows path limits.
 - Log mutexes atomically grant SYSTEM and elevated administrators shared access; CI checks both creator accounts. Benign pre/postflight failures print their diagnostic reasons.
 - Record three fixed benign Windows command launches with signed-file/process identity and pre/postflight; unreviewed observations never become measured rates automatically.
 - Monitoring tasks start and continue on battery power; installation/upgrade share explicit power settings, and task integrity rejects battery-stopping settings.
