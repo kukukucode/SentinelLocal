@@ -1,5 +1,5 @@
 ﻿function Read-SentinelSysmon {
-    param([string]$Root,$Config,[scriptblock]$ScoreProcess,[scriptblock]$QueueResponse)
+    param([string]$Root,$Config,[scriptblock]$ScoreProcess,[scriptblock]$QueueResponse,[ValidateRange(1,60)][int]$MaximumProcessingSeconds=10)
     if(-not $Config.Sysmon.Enabled) {return}
     $cursorPath=Join-Path $Root 'state\sysmon-cursor.json';$cachePath=Join-Path $Root 'state\sysmon-correlations.json'
     $cursor=0L;$time='';$cache=@{}
@@ -18,6 +18,7 @@
         $cache=@{};Write-SentinelAtomicJson $cachePath ([ordered]@{Processes=@()})
         Write-SentinelAtomicJson $cursorPath ([ordered]@{RecordId=0L;TimeCreated=''})
     }
+    $processingStarted=Get-SentinelSysmonMonotonicSeconds
     foreach($event in @($batch.Events)) {
         $data=Get-SentinelEventData $event
         if(-not (Write-SentinelJsonLine (Join-Path $Root 'logs\sysmon-events.jsonl') ([ordered]@{Type='SysmonEvent';EventId=$event.Id;RecordId=$event.RecordId;EventTime=$event.TimeCreated.ToString('o');Data=$data}))) {throw 'Cannot persist Sysmon event.'}
@@ -76,7 +77,15 @@
         # Save correlation before cursor. A queue/log failure leaves this durable event retryable.
         Write-SentinelAtomicJson $cachePath ([ordered]@{Processes=@($cache.Values)})
         Write-SentinelAtomicJson $cursorPath ([ordered]@{RecordId=[long]$event.RecordId;TimeCreated=$event.TimeCreated.ToString('o')})
+        # Yield only after this event is fully durable. A large backlog must not
+        # monopolize the Watcher loop and starve heartbeat/Defender/health work.
+        # One event (or the source query) can still exceed the cooperative budget.
+        if((Get-SentinelSysmonMonotonicSeconds)-$processingStarted -ge $MaximumProcessingSeconds){break}
     }
+}
+
+function Get-SentinelSysmonMonotonicSeconds {
+    return [double][Diagnostics.Stopwatch]::GetTimestamp()/[Diagnostics.Stopwatch]::Frequency
 }
 
 function Initialize-SentinelProcessMonitor {

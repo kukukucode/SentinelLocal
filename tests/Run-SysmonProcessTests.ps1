@@ -37,6 +37,23 @@ Test 'Exited processes retain recorded identity command line birth time GUID and
     $cache=Get-Content (Join-Path $root 'state\sysmon-correlations.json') -Raw | ConvertFrom-Json
     Assert (@($cache.Processes).Count -eq 0) 'Benign zero-score processes expanded correlation state'
 }
+Test 'Slow Sysmon batches yield after durable events and resume without skipping the remaining backlog' {
+    $root=Fixture 'bounded-batch';$script:FakeTick=0
+    $events=@((Event 1 1 (Get-FixtureData 1)),(Event 1 2 (Get-FixtureData 2)),(Event 1 3 (Get-FixtureData 3)))
+    function Get-SentinelSysmonMonotonicSeconds{return $script:FakeTick}
+    function Get-SentinelEventBatch{param($LogName,$Cursor,$CursorTime,$Ids,$BatchSize) [pscustomobject]@{Reset=$false;Events=@($events | Where-Object {$_.RecordId -gt $Cursor})}}
+    $score={param($process) $script:FakeTick+=6;[pscustomobject]@{Score=0;Reasons=@()}}
+    Read-SentinelSysmon $root $config $score {throw 'Must not queue'}
+    $cursor=Get-Content (Join-Path $root 'state\sysmon-cursor.json') -Raw | ConvertFrom-Json
+    $rows=@(Get-Content (Join-Path $root 'logs\process-events.jsonl') | ForEach-Object {$_ | ConvertFrom-Json})
+    Assert ($cursor.RecordId -eq 2 -and $rows.Count -eq 2) 'Slow batch failed to yield at a durable boundary.'
+    Read-SentinelSysmon $root $config $score {throw 'Must not queue'}
+    $cursor=Get-Content (Join-Path $root 'state\sysmon-cursor.json') -Raw | ConvertFrom-Json
+    $rows=@(Get-Content (Join-Path $root 'logs\process-events.jsonl') | ForEach-Object {$_ | ConvertFrom-Json})
+    Assert ($cursor.RecordId -eq 3 -and $rows.Count -eq 3 -and @($rows.RecordId | Sort-Object -Unique).Count -eq 3) 'Resuming duplicated or skipped source events.'
+    Assert (Get-SentinelLogVerification (Join-Path $root 'logs\process-events.jsonl')).Valid 'Yield damaged the evidence chain.'
+    Refused {Read-SentinelSysmon $root $config $score {} -MaximumProcessingSeconds 0}
+}
 Test 'Durable observation requires all identities and rejects PID reuse hash changes and ambiguous events' {
     $root=Join-Path $ScratchRoot 'exited'
     $rows=@(Get-Content (Join-Path $root 'logs\process-events.jsonl') | ForEach-Object {$_ | ConvertFrom-Json})
