@@ -57,6 +57,32 @@ function Assert-SentinelBenchmarkTelemetryWindow($SourceEvents,$Alerts,$Errors,[
     if(@($Errors | Where-Object {$_.Component -eq 'Sysmon' -and [datetimeoffset]$_.Timestamp -ge $Start -and [datetimeoffset]$_.Timestamp -le $End}).Count){throw 'Sentinel reported a Sysmon read/persistence failure during observation.'}
 }
 
+function Export-SentinelBenchmarkSnapshot([string]$Root,[string]$Destination) {
+    # Reviewed helpers are already loaded. Never import an installed script or
+    # an optional scripts/Common.ps1; diagnostics must not repair source logs.
+    $stage=Join-Path $Destination ('.pending-'+[guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path (Join-Path $stage 'logs'),(Join-Path $stage 'state\log-chain') -Force | Out-Null
+    $entries=@()
+    foreach($log in @(Get-ChildItem -LiteralPath (Join-Path $Root 'logs') -Filter '*.jsonl' -File -ErrorAction Stop)){
+        $mutex=Enter-SentinelLogLock $log.FullName
+        try {
+            $statePath=Get-SentinelChainPath $log.FullName
+            if(Test-Path ($statePath+'.pending')){throw 'A source log transaction is pending; benchmark export will not repair it.'}
+            $checkpoint=Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
+            if($checkpoint.Schema -ne 2 -or -not (Test-SentinelSnapshotMatches (Get-SentinelLogSnapshot $log.FullName) $checkpoint)){throw ('Source log/checkpoint mismatch: '+$log.Name)}
+            $copy=Join-Path $stage ('logs\'+$log.Name)
+            Copy-Item -LiteralPath $log.FullName -Destination $copy -ErrorAction Stop
+            Write-SentinelAtomicJson (Get-SentinelChainPath $copy) $checkpoint
+            $entries+=@([ordered]@{Name=$log.Name;SHA256=(Get-FileHash $copy).Hash;Length=$checkpoint.ByteLength;LineCount=$checkpoint.LineCount;LastHash=$checkpoint.LastHash})
+        }finally{$mutex.ReleaseMutex();$mutex.Dispose()}
+    }
+    if(-not $entries.Count){throw 'No source log streams were available.'}
+    Write-SentinelAtomicJson (Join-Path $stage 'manifest.json') ([ordered]@{Schema=1;ComputerName=$env:COMPUTERNAME;CapturedAt=[datetimeoffset]::Now.ToString('o');ReadOnlySource=$true;Files=$entries})
+    $complete=Join-Path $Destination ('snapshot-'+[guid]::NewGuid().ToString('N'))
+    [IO.Directory]::Move($stage,$complete)
+    return $complete
+}
+
 function Invoke-SentinelBenignBenchmark([string]$Root,[string]$OutputDirectory,[int]$Rounds=10,[int]$ObservationSeconds=120) {
     if($Rounds -lt 1 -or $Rounds -gt 100 -or $ObservationSeconds -lt 60 -or $ObservationSeconds -gt 600){throw 'Rounds must be 1..100 and observation window 60..600 seconds.'}
     $rootPath=[IO.Path]::GetFullPath($Root).TrimEnd('\');$output=[IO.Path]::GetFullPath($OutputDirectory).TrimEnd('\')
@@ -108,7 +134,7 @@ function Invoke-SentinelBenignBenchmark([string]$Root,[string]$OutputDirectory,[
     $snapshot=$null;$records=@();$defenderStatus='Unverified';$native=@();$windowStart=$null;$windowEnd=$null
     if($trials.Count){$windowStart=[datetimeoffset]$trials[0].StartedAt;$windowEnd=[datetimeoffset]$trials[-1].ObservationEndedAt}
     try {
-        $snapshot=@(& (Join-Path $evaluationRepo 'scripts\Export-SentinelAudit.ps1') -Root $rootPath -DestinationPath (Join-Path $output 'sentinel'))[0]
+        $snapshot=Export-SentinelBenchmarkSnapshot $rootPath (Join-Path $output 'sentinel')
         $path=Join-Path $snapshot 'logs\process-events.jsonl'
         if(-not (Get-SentinelLogVerification $path).Valid){throw 'Process snapshot verification failed.'}
         $records=@(Get-Content $path -Encoding UTF8 | ForEach-Object {$_ | ConvertFrom-Json})

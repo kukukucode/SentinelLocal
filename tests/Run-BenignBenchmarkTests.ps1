@@ -78,6 +78,22 @@ Test 'Unready or disabled-Sysmon preflight starts no commands and invalid paths 
     Refused {Invoke-SentinelBenignBenchmark $root $output 0 120}
     Refused {Invoke-SentinelBenignBenchmark $root $output 10 5}
 }
+Test 'Benchmark export verifies copied chains and leaves pending or damaged source logs untouched' {
+    $root=Join-Path $ScratchRoot 'export-source';$log=Join-Path $root 'logs\process-events.jsonl'
+    Assert (Write-SentinelJsonLine $log ([ordered]@{Type='Fixture'})) 'Fixture append failed.'
+    $before=(Get-FileHash $log).Hash
+    $snapshot=Export-SentinelBenchmarkSnapshot $root (Join-Path $ScratchRoot 'exported')
+    $copy=Join-Path $snapshot 'logs\process-events.jsonl'
+    Assert ((Get-FileHash $copy).Hash -eq $before -and (Get-SentinelLogVerification $copy).Valid -and (Get-FileHash $log).Hash -eq $before) 'Copy differed, failed chain or mutated source.'
+    $pending=(Get-SentinelChainPath $log)+'.pending';Write-SentinelAtomicJson $pending @{Fixture='Pending'}
+    $pendingBefore=(Get-FileHash $pending).Hash
+    Refused {Export-SentinelBenchmarkSnapshot $root (Join-Path $ScratchRoot 'export-pending')}
+    Assert ((Get-FileHash $log).Hash -eq $before -and (Get-FileHash $pending).Hash -eq $pendingBefore) 'Pending transaction repaired or deleted.'
+    Remove-Item -LiteralPath $pending
+    Add-Content $log '{}';$tampered=(Get-FileHash $log).Hash
+    Refused {Export-SentinelBenchmarkSnapshot $root (Join-Path $ScratchRoot 'export-tampered')}
+    Assert ((Get-FileHash $log).Hash -eq $tampered) 'Damaged source was repaired.'
+}
 $results.ToArray() | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $ScratchRoot 'test-results.json') -Encoding UTF8
 $failed=@($results | Where-Object {-not $_.Passed}).Count
 Write-Host ('Benign benchmark tests: '+($results.Count-$failed)+'/'+$results.Count+' passed.')
