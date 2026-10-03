@@ -51,7 +51,7 @@ function Fixture([string]$Name) {
         $arguments='-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Root "{1}"' -f (Join-Path $root $component.Script),$root
         $script:Processes[$component.PidValue]=[pscustomobject]@{ProcessId=$component.PidValue;ExecutablePath=$powershell;CommandLine='"'+$powershell+'" '+$arguments;CreationDate=$now.AddMinutes(-1).UtcDateTime}
         $script:Tasks[$component.Task]=[pscustomobject]@{
-            State='Running';Settings=[pscustomobject]@{Enabled=$true}
+            State='Running';Settings=[pscustomobject]@{Enabled=$true;DisallowStartIfOnBatteries=$false;StopIfGoingOnBatteries=$false}
             Actions=@([pscustomobject]@{Execute=$powershell;Arguments=$arguments;WorkingDirectory=''})
             Principal=[pscustomobject]@{UserId='SYSTEM';RunLevel='Highest';LogonType='ServiceAccount'}
             Triggers=@([pscustomobject]@{CimClass=[pscustomobject]@{CimClassName='MSFT_TaskBootTrigger'};Enabled=$true;StartBoundary='';EndBoundary='';Delay='';Repetition=[pscustomobject]@{Interval='';Duration=''}})
@@ -156,6 +156,8 @@ Run-Test 'Disabled or modified tasks and a busy worker require a clean baseline'
     Assert (-not (Get-SentinelEvaluationReadiness $root $now).ReadyForBenignTrials) 'Disabled task accepted'
     $script:Tasks['SentinelLocal Watcher'].Settings.Enabled=$true;$script:Tasks['SentinelLocal Watcher'].Actions[0].Execute='C:\Other\powershell.exe'
     Assert (-not (Get-SentinelEvaluationReadiness $root $now).ReadyForBenignTrials) 'Modified task accepted'
+    $root=Fixture 'battery-task';$script:Tasks['SentinelLocal Watcher'].Settings.StopIfGoingOnBatteries=$true
+    Assert (-not (Get-SentinelEvaluationReadiness $root $now).ReadyForBenignTrials) 'Battery-stopped monitoring accepted as a measurement baseline'
     $root=Fixture 'busy';$path=Join-Path $root 'state\response-worker-heartbeat.json'
     $heartbeat=Get-Content $path -Raw | ConvertFrom-Json;$heartbeat.Status='Busy';Write-SentinelAtomicJson $path $heartbeat
     $report=Get-SentinelEvaluationReadiness $root $now

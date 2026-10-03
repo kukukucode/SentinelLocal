@@ -161,7 +161,7 @@ Test 'Baseline regeneration fails before replacing old baseline on missing file'
     Assert ((Get-FileHash $path).Hash -eq $before) 'Previous baseline overwritten'
 }
 function Task {
-    [pscustomobject]@{Actions=@([pscustomobject]@{Execute=(Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe');Arguments=('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "'+(Join-Path $root 'Watcher.ps1')+'" -Root "'+$root+'"');WorkingDirectory=''});Principal=[pscustomobject]@{UserId='SYSTEM';RunLevel='Highest';LogonType='ServiceAccount'};Triggers=@([pscustomobject]@{Enabled=$true;CimClass=[pscustomobject]@{CimClassName='MSFT_TaskBootTrigger'};Repetition=[pscustomobject]@{Interval='';Duration=''}})}
+    [pscustomobject]@{Settings=[pscustomobject]@{DisallowStartIfOnBatteries=$false;StopIfGoingOnBatteries=$false};Actions=@([pscustomobject]@{Execute=(Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe');Arguments=('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "'+(Join-Path $root 'Watcher.ps1')+'" -Root "'+$root+'"');WorkingDirectory=''});Principal=[pscustomobject]@{UserId='SYSTEM';RunLevel='Highest';LogonType='ServiceAccount'};Triggers=@([pscustomobject]@{Enabled=$true;CimClass=[pscustomobject]@{CimClassName='MSFT_TaskBootTrigger'};Repetition=[pscustomobject]@{Interval='';Duration=''}})}
 }
 Test 'Task validates exact executable arguments principal and one boot trigger' {
     Assert (Test-SentinelTaskDefinition (Task) $root 'SentinelLocal Watcher') 'Expected task rejected'
@@ -169,6 +169,16 @@ Test 'Task validates exact executable arguments principal and one boot trigger' 
         $t=Task
         switch($variant){extraAction {$t.Actions+=@($t.Actions[0])} exe {$t.Actions[0].Execute='C:\Whatever\powershell.exe'} args {$t.Actions[0].Arguments+=' -Command bad'} user {$t.Principal.UserId='user'} level {$t.Principal.RunLevel='Limited'} logon {$t.Principal.LogonType='Interactive'} extraTrigger {$t.Triggers+=@($t.Triggers[0])} trigger {$t.Triggers[0].CimClass.CimClassName='MSFT_TaskTimeTrigger'} disabledTrigger {$t.Triggers[0].Enabled=$false} repetition {$t.Triggers[0].Repetition.Interval='PT1M'}}
         Assert (-not (Test-SentinelTaskDefinition $t $root 'SentinelLocal Watcher')) ('Tampered task accepted: '+$variant)
+    }
+    foreach($variant in @('batteryStart','batteryStop','missingSettings','missingBatteryFlag')) {
+        $t=Task
+        switch($variant) {
+            batteryStart {$t.Settings.DisallowStartIfOnBatteries=$true}
+            batteryStop {$t.Settings.StopIfGoingOnBatteries=$true}
+            missingSettings {$t.Settings=$null}
+            missingBatteryFlag {$t.Settings.PSObject.Properties.Remove('StopIfGoingOnBatteries')}
+        }
+        Assert (-not (Test-SentinelTaskDefinition $t $root 'SentinelLocal Watcher')) ('Unsafe or incomplete power settings accepted: '+$variant)
     }
 }
 Test 'Persistence parsing expands environment and captures script DLL and shell targets inertly' {
@@ -294,6 +304,10 @@ Test 'Real Scheduled Task CIM objects satisfy strict startup definition' {
     $trigger=New-ScheduledTaskTrigger -AtStartup
     $principal=New-ScheduledTaskPrincipal -UserId SYSTEM -LogonType ServiceAccount -RunLevel Highest
     $task=New-ScheduledTask -Action $action -Trigger $trigger -Principal $principal
+    Assert (-not (Test-SentinelTaskDefinition $task $root 'SentinelLocal Watcher')) 'Battery-stopping defaults were accepted'
+    $settings=New-SentinelMonitoringTaskSettings
+    Assert (-not $settings.DisallowStartIfOnBatteries -and -not $settings.StopIfGoingOnBatteries) 'Monitoring factory retained battery stopping conditions'
+    $task=New-ScheduledTask -Action $action -Trigger $trigger -Principal $principal -Settings $settings
     Assert (Test-SentinelTaskDefinition $task $root 'SentinelLocal Watcher') 'Real CIM task differed from expected definition'
 }
 

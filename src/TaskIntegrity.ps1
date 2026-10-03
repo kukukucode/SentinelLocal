@@ -11,10 +11,20 @@
     }
     return $baseline
 }
+function New-SentinelMonitoringTaskSettings {
+    # Task Scheduler otherwise stops all three components when AC is unplugged
+    # and refuses starts while on battery. Protection must continue on laptops.
+    return New-ScheduledTaskSettingsSet -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 3650) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+}
 function Test-SentinelTaskDefinition {
     param($Task,[string]$Root,[string]$TaskName)
     $scripts=@{'SentinelLocal Watcher'='Watcher.ps1';'SentinelLocal Response Worker'='ResponseWorker.ps1';'SentinelLocal Integrity Monitor'='IntegrityMonitor.ps1'}
     if(-not $Task -or -not $scripts.ContainsKey($TaskName)) {return $false}
+    if(-not $Task.Settings) {return $false}
+    foreach($name in @('DisallowStartIfOnBatteries','StopIfGoingOnBatteries')) {
+        $value=$Task.Settings.$name
+        if($value -isnot [bool] -or $value) {return $false}
+    }
     $actions=@($Task.Actions);$triggers=@($Task.Triggers)
     if($actions.Count -ne 1 -or $triggers.Count -ne 1) {return $false}
     $arguments='-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Root "{1}"' -f (Join-Path $Root $scripts[$TaskName]),$Root
