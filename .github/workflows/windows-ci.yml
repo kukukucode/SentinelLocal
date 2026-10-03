@@ -65,6 +65,10 @@ jobs:
         run: |
           git diff --check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Bounded benign measurement regressions
+        run: |
+          & .\tests\Run-BenignBenchmarkTests.ps1 -ScratchRoot (Join-Path $env:RUNNER_TEMP 'SentinelLocal-benchmark-tests')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Durable process identity regressions
         run: |
           & .\tests\Run-SysmonProcessTests.ps1 -ScratchRoot (Join-Path $env:RUNNER_TEMP 'SentinelLocal-sysmon-process-tests')
@@ -86,6 +90,7 @@ jobs:
             ${{ runner.temp }}/SentinelLocal-evaluation-readiness-tests/test-results.json
             ${{ runner.temp }}/SentinelLocal-watcher-startup-tests/test-results.json
             ${{ runner.temp }}/SentinelLocal-benign-observation-tests/test-results.json
+            ${{ runner.temp }}/SentinelLocal-benchmark-tests/test-results.json
             ${{ runner.temp }}/SentinelLocal-sysmon-process-tests/test-results.json
             ${{ runner.temp }}/SentinelLocal-sysmon-integration/test-results.json
             ${{ runner.temp }}/SentinelLocal-sysmon-integration/captured-processes.json
