@@ -4,6 +4,7 @@ $repo=Split-Path -Parent $PSScriptRoot
 . (Join-Path $repo 'src\Common.ps1')
 . (Join-Path $repo 'src\SysmonMonitoring.ps1')
 . (Join-Path $repo 'tools\sysmon\SysmonSetup.ps1')
+. (Join-Path $repo 'tools\evaluation\DurableObservation.ps1')
 if(Test-Path $ScratchRoot){throw 'Scratch directory already exists.'}
 New-Item -ItemType Directory -Path $ScratchRoot | Out-Null
 $results=[Collections.Generic.List[object]]::new()
@@ -35,6 +36,21 @@ Test 'Exited processes retain recorded identity command line birth time GUID and
     Assert (Get-SentinelLogVerification (Join-Path $root 'logs\process-events.jsonl')).Valid 'Process evidence chain invalid'
     $cache=Get-Content (Join-Path $root 'state\sysmon-correlations.json') -Raw | ConvertFrom-Json
     Assert (@($cache.Processes).Count -eq 0) 'Benign zero-score processes expanded correlation state'
+}
+Test 'Durable observation requires all identities and rejects PID reuse hash changes and ambiguous events' {
+    $root=Join-Path $ScratchRoot 'exited'
+    $rows=@(Get-Content (Join-Path $root 'logs\process-events.jsonl') | ForEach-Object {$_ | ConvertFrom-Json})
+    $trials=@($rows | ForEach-Object {[pscustomobject]@{Id=[string]$_.RecordId;ProcessId=$_.Process.ProcessId;ExecutablePath=$_.Process.ExecutablePath;SHA256=$_.Process.ObservedSHA256;ProcessCreatedAt=$_.Process.CreationDate;Arguments='inert-argument'}})
+    $packet=[pscustomobject]@{Kind='BenignObservationPacket';CommandsSucceeded=$true;Root=$root;Trials=$trials}
+    $report=Get-SentinelDurableObservation $packet
+    Assert ($report.Complete -and $report.CapturedCount -eq 3 -and -not $report.PerformanceMeasured -and $report.ReviewRequired) 'Capture became performance data or lost identity.'
+    $trials[0].SHA256='B'*64
+    Assert (-not (Compare-SentinelDurableObservation $packet $rows).Complete) 'Changed hash accepted.'
+    $trials[0].SHA256='A'*64;$trials[0].ProcessCreatedAt='2026-10-03T00:00:01.123Z'
+    Assert (-not (Compare-SentinelDurableObservation $packet $rows).Complete) 'Reused PID at another creation time accepted.'
+    $trials[0].ProcessCreatedAt=$rows[0].Process.CreationDate
+    Assert (-not (Compare-SentinelDurableObservation $packet (@($rows)+@($rows[0]))).Complete) 'Ambiguous events accepted.'
+    $packet.CommandsSucceeded=$false;Refused {Compare-SentinelDurableObservation $packet $rows}
 }
 Test 'Queue failure leaves durable creation retryable and keeps recorded SHA256' {
     $root=Fixture 'retry';$script:Batch=[pscustomobject]@{Reset=$false;Events=@((Event 1 1 (Get-FixtureData 1)))}

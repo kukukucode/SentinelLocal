@@ -123,4 +123,12 @@ ATT&CKは技術ごとにNotTested、TestedNoDetection、DetectedInSomeTrials、D
 
 ## 次に実測する項目
 
+短時間コマンドのCIM取得漏れを調べる場合は、運用ガイドのSysmon導入・有効化を行い、新しい3コマンド観測パケットを作成します。管理者PowerShellで次を実行すると、検証済みの`process-events.jsonl`からPID・パス・SHA256・生成時刻（100ms以内）・引数が一致する記録を照合します。
+
+```powershell
+.\tools\evaluation\Test-SentinelDurableObservation.ps1 -ObservationDirectory $trialRoot
+```
+
+3件それぞれに一意の記録と異なるProcessGuidがあれば`Complete=true`になります。欠落、異なる生成時刻、ハッシュ不一致、複数候補はUnverifiedです。この確認はプロセス情報の保存だけを評価します。警告の誤検知判定や観測窓全体の完全性は別途レビューするため、PerformanceMeasured=false、ReviewRequired=trueを維持します。
+
 まず、正常なアプリ起動や通常のPowerShell操作を限定した一覧で試し、観測開始・終了と警告の証拠を自動記録する補助ツールを追加します。そこで正常に観測できることを確かめてから、無害な技術再現、対象技術の拡大、隔離環境での実検体評価へ進みます。
