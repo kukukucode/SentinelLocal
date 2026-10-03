@@ -16,6 +16,8 @@ Microsoft Defenderを主防御エンジンとして利用する、軽量Host IDS
 | config/ | 初期設定のConfig.json |
 | docs/ | 日本語説明書と運用・開発ガイド |
 | tests/ | 回帰試験とテスト補助コード |
+| tools/evaluation/ | 防御性能の試験結果を集計する開発用ツール |
+| tools/sysmon/ | Microsoft Sysmonの署名・ハッシュを確認して導入する開発用補助ツール |
 | .github/ | Windows CI |
 
 ソースから使う場合はscripts/のスクリプトを実行します。New-SentinelPackage.ps1で作る配布パッケージとインストール先は従来の配置を使用します。[構成・開発ガイド](docs/REPOSITORY_JP.md)を参照してください。
@@ -36,6 +38,10 @@ v1.1.0では、スキャン失敗の再試行、ログ削除検知、イベン�
 現在の **v1.2.1はWindows PC 1台向けの試験運用版** です。内容のハッシュによる再スキャン判定、再起動をまたぐ永続化比較、容量管理、更新の復元・起動確認、読み取り専用の診断、HTML/JSON調査レポート、設定の検証・復元、署名付きパッケージの検証に対応します。[個人PC試験運用ガイド](docs/PILOT_JP.md)を参照してください。
 
 企業製品と同等の防御性能は未実証です。Windows 11での診断・CIと、実際の管理者導入・Defenderスキャン・長期運用の検証は別です。
+
+実マルウェアに対する検知率・正常操作の誤検知率・検知時間・ATT&CKカバレッジは未測定です。[評価ガイド](docs/EVALUATION_JP.md)に、段階的な測定手順、測定前の読み取り専用診断、試験結果の入力・集計方法を記載しています。同梱のサンプルは架空データで、製品性能の実測値ではありません。
+
+短時間で終了するプロセスの観測には、任意のSysmon連携を利用できます。有効時は作成イベントのパス・コマンドライン・生成時刻・ProcessGuid・SHA256を`logs/process-events.jsonl`へ保存し、終了後のPIDへの問い合わせを避けます。導入方法と保存内容は[運用ガイド](docs/OPERATIONS_JP.md)を参照してください。
 
 ## 主な機能
 
@@ -148,6 +154,8 @@ GitHub ActionsでWindows Server 2022 / 2025のWindows PowerShell 5.1を使用し
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-PilotTests.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-EvaluationTests.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-EvaluationReadinessTests.ps1
 ```
 
 テストは一時フォルダーとモックを使用します。Defenderの実スキャン、インストール、OS設定変更は行いません。Windowsの実機・VMでのインストール後の検証は別途必要です。

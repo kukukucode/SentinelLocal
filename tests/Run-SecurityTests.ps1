@@ -51,10 +51,28 @@ function Sign([string]$Root,$Cert) {
     $signer=[Security.Cryptography.Pkcs.CmsSigner]::new($Cert);$signer.DigestAlgorithm=[Security.Cryptography.Oid]::new('2.16.840.1.101.3.4.2.1')
     $cms.ComputeSignature($signer);[IO.File]::WriteAllBytes($path+'.p7s',$cms.Encode())
 }
-function Write-EventLog {} # No real Event Log/Defender/task mutation in this suite.
+function Write-EventLog {} # No real Defender scans or Sentinel task mutation.
+Test 'Log mutex explicitly grants SYSTEM and administrators without broad access' {
+    $mutex=Enter-SentinelLogLock (Join-Path $ScratchRoot 'mutex-acl.jsonl')
+    try {
+        $security=$mutex.GetAccessControl()
+        Assert $security.AreAccessRulesProtected 'Mutex inherited creator-dependent permissions'
+        $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+        try {
+            $privileged=([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) -or $identity.User.Value -eq 'S-1-5-18'
+            $expected=@('S-1-5-18','S-1-5-32-544')
+            if(-not $privileged){$expected+=$identity.User.Value}
+            $rules=@($security.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
+            Assert ($rules.Count -eq $expected.Count) 'Unexpected mutex access rules'
+            foreach($sid in $expected){Assert (@($rules | Where-Object {$_.IdentityReference.Value -eq $sid -and $_.AccessControlType -eq 'Allow' -and $_.MutexRights -eq 'FullControl'}).Count -eq 1) ('Missing explicit full access for '+$sid)}
+            $owner=if($privileged){'S-1-5-32-544'}else{$identity.User.Value}
+            Assert ($security.GetOwner([Security.Principal.SecurityIdentifier]).Value -eq $owner) 'Unexpected mutex owner'
+        } finally {$identity.Dispose()}
+    } finally {$mutex.ReleaseMutex();$mutex.Dispose()}
+}
 Test 'Trusted bootstrap verifies bytes without importing payload code' {
     $root=Package 'bootstrap-valid';$r=VerifyDevelopment $root
-    Assert ($r.Valid -and $r.Files -eq @(Get-SentinelPackageFiles).Count+7) 'Valid package failed'
+    Assert ($r.Valid -and $r.Files -eq @(Get-SentinelPackageFiles).Count+8) 'Valid package failed'
     $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($bootstrap,[ref]$tokens,[ref]$errors)
     Assert ($errors.Count -eq 0) 'Bootstrap syntax failure'
     $imports=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst] -and $n.InvocationOperator -eq 'Dot'},$true))
@@ -161,7 +179,7 @@ Test 'Baseline regeneration fails before replacing old baseline on missing file'
     Assert ((Get-FileHash $path).Hash -eq $before) 'Previous baseline overwritten'
 }
 function Task {
-    [pscustomobject]@{Actions=@([pscustomobject]@{Execute=(Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe');Arguments=('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "'+(Join-Path $root 'Watcher.ps1')+'" -Root "'+$root+'"');WorkingDirectory=''});Principal=[pscustomobject]@{UserId='SYSTEM';RunLevel='Highest';LogonType='ServiceAccount'};Triggers=@([pscustomobject]@{Enabled=$true;CimClass=[pscustomobject]@{CimClassName='MSFT_TaskBootTrigger'};Repetition=[pscustomobject]@{Interval='';Duration=''}})}
+    [pscustomobject]@{Settings=[pscustomobject]@{DisallowStartIfOnBatteries=$false;StopIfGoingOnBatteries=$false};Actions=@([pscustomobject]@{Execute=(Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe');Arguments=('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "'+(Join-Path $root 'Watcher.ps1')+'" -Root "'+$root+'"');WorkingDirectory=''});Principal=[pscustomobject]@{UserId='SYSTEM';RunLevel='Highest';LogonType='ServiceAccount'};Triggers=@([pscustomobject]@{Enabled=$true;CimClass=[pscustomobject]@{CimClassName='MSFT_TaskBootTrigger'};Repetition=[pscustomobject]@{Interval='';Duration=''}})}
 }
 Test 'Task validates exact executable arguments principal and one boot trigger' {
     Assert (Test-SentinelTaskDefinition (Task) $root 'SentinelLocal Watcher') 'Expected task rejected'
@@ -169,6 +187,16 @@ Test 'Task validates exact executable arguments principal and one boot trigger' 
         $t=Task
         switch($variant){extraAction {$t.Actions+=@($t.Actions[0])} exe {$t.Actions[0].Execute='C:\Whatever\powershell.exe'} args {$t.Actions[0].Arguments+=' -Command bad'} user {$t.Principal.UserId='user'} level {$t.Principal.RunLevel='Limited'} logon {$t.Principal.LogonType='Interactive'} extraTrigger {$t.Triggers+=@($t.Triggers[0])} trigger {$t.Triggers[0].CimClass.CimClassName='MSFT_TaskTimeTrigger'} disabledTrigger {$t.Triggers[0].Enabled=$false} repetition {$t.Triggers[0].Repetition.Interval='PT1M'}}
         Assert (-not (Test-SentinelTaskDefinition $t $root 'SentinelLocal Watcher')) ('Tampered task accepted: '+$variant)
+    }
+    foreach($variant in @('batteryStart','batteryStop','missingSettings','missingBatteryFlag')) {
+        $t=Task
+        switch($variant) {
+            batteryStart {$t.Settings.DisallowStartIfOnBatteries=$true}
+            batteryStop {$t.Settings.StopIfGoingOnBatteries=$true}
+            missingSettings {$t.Settings=$null}
+            missingBatteryFlag {$t.Settings.PSObject.Properties.Remove('StopIfGoingOnBatteries')}
+        }
+        Assert (-not (Test-SentinelTaskDefinition $t $root 'SentinelLocal Watcher')) ('Unsafe or incomplete power settings accepted: '+$variant)
     }
 }
 Test 'Persistence parsing expands environment and captures script DLL and shell targets inertly' {
@@ -259,6 +287,10 @@ Test 'Bootstrap is emitted separately and never made trusted by package manifest
 
 Test 'Worker preserves an unresolved live target in failed queue instead of completing it' {
     $root=Fixture 'worker-unresolved';$config=Get-Content (Join-Path $root 'Config.json') -Raw | ConvertFrom-Json
+    # Keep the fixture independent of a real installed worker on the test PC.
+    $workerPath=Join-Path $root 'ResponseWorker.ps1'
+    $workerText=[IO.File]::ReadAllText($workerPath).Replace('Global\SentinelLocalResponseWorker','Global\SentinelLocalTestWorker_'+[guid]::NewGuid().ToString('N'))
+    [IO.File]::WriteAllText($workerPath,$workerText,[Text.UTF8Encoding]::new($true))
     $config.ResponseQueueMaxAttempts=1;$config.ResponseQueuePollSeconds=1;$config.ResponseWorkerHeartbeatSeconds=1;$config.ResponseTimeoutSeconds=10;$config.NormalResponseTimeoutSeconds=10
     Write-SentinelAtomicJson (Join-Path $root 'Config.json') $config
     [IO.File]::AppendAllText((Join-Path $root 'Common.ps1'),[Environment]::NewLine+'function Write-EventLog {}'+[Environment]::NewLine)
@@ -294,6 +326,10 @@ Test 'Real Scheduled Task CIM objects satisfy strict startup definition' {
     $trigger=New-ScheduledTaskTrigger -AtStartup
     $principal=New-ScheduledTaskPrincipal -UserId SYSTEM -LogonType ServiceAccount -RunLevel Highest
     $task=New-ScheduledTask -Action $action -Trigger $trigger -Principal $principal
+    Assert (-not (Test-SentinelTaskDefinition $task $root 'SentinelLocal Watcher')) 'Battery-stopping defaults were accepted'
+    $settings=New-SentinelMonitoringTaskSettings
+    Assert (-not $settings.DisallowStartIfOnBatteries -and -not $settings.StopIfGoingOnBatteries) 'Monitoring factory retained battery stopping conditions'
+    $task=New-ScheduledTask -Action $action -Trigger $trigger -Principal $principal -Settings $settings
     Assert (Test-SentinelTaskDefinition $task $root 'SentinelLocal Watcher') 'Real CIM task differed from expected definition'
 }
 
@@ -304,6 +340,75 @@ if($admin) {
     $acl=[Security.AccessControl.DirectorySecurity]::new();$acl.SetAccessRuleProtection($true,$false);$acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
     foreach($sid in @('S-1-5-32-544','S-1-5-18')){$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($sid),'FullControl','ContainerInherit,ObjectInherit','None','Allow'))}
     [void][IO.Directory]::CreateDirectory($protected,$acl)
+    Test 'Elevated log access rejects an existing mutex with broader permissions' {
+        $path=Join-Path $protected 'unsafe-mutex.jsonl'
+        $name='Global\SentinelLocalLog_'+(Get-SentinelStringHash ([IO.Path]::GetFullPath($path).ToLowerInvariant())).Substring(0,24)
+        $security=[Security.AccessControl.MutexSecurity]::new();$security.SetAccessRuleProtection($true,$false)
+        $security.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+        foreach($sid in @('S-1-5-18','S-1-5-32-544','S-1-1-0')){$security.AddAccessRule([Security.AccessControl.MutexAccessRule]::new([Security.Principal.SecurityIdentifier]::new($sid),'FullControl','Allow'))}
+        $created=$false;$unsafe=[Threading.Mutex]::new($false,$name,[ref]$created,$security)
+        try {
+            Refused {Enter-SentinelLogLock $path} 'A pre-created broadly accessible mutex was trusted'
+            Assert (@($unsafe.GetAccessControl().GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]) | Where-Object {$_.IdentityReference.Value -eq 'S-1-1-0'}).Count -eq 1) 'Existing mutex was silently resecured'
+        } finally {$unsafe.Dispose()}
+    }
+    Test 'SYSTEM and administrator share log mutexes regardless of creator' {
+        # Only a protected CI fixture is executed as SYSTEM. No installed code,
+        # real logs, Sentinel tasks or Defender settings are touched.
+        $root=Join-Path $protected 'cross-account-locks';[void][IO.Directory]::CreateDirectory($root,$acl)
+        foreach($file in Get-SentinelPackageFiles){Copy-Item -LiteralPath (Get-SentinelSourcePath $packageRoot $file) -Destination (Join-Path $root $file)}
+        $probe=Join-Path $root 'MutexProbe.ps1'
+        $code=@'
+param([string]$Root)
+$ErrorActionPreference='Stop'
+$adminLock=$null;$systemLock=$null
+try {
+    . (Join-Path $Root 'Common.ps1')
+    if([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18'){throw 'Probe did not run as SYSTEM.'}
+    $adminLock=Enter-SentinelLogLock (Join-Path $Root 'admin-created.jsonl')
+    $adminLock.ReleaseMutex()
+    $systemLock=Enter-SentinelLogLock (Join-Path $Root 'system-created.jsonl')
+    $systemLock.ReleaseMutex()
+    [IO.File]::WriteAllText((Join-Path $Root 'system-ready.txt'),'SYSTEM acquired both locks')
+    $timer=[Diagnostics.Stopwatch]::StartNew()
+    while(-not (Test-Path -LiteralPath (Join-Path $Root 'admin-done.txt'))) {
+        if($timer.Elapsed.TotalSeconds -gt 30){throw 'Administrator did not complete the handshake.'}
+        Start-Sleep -Milliseconds 100
+    }
+    [IO.File]::WriteAllText((Join-Path $Root 'system-done.txt'),'OK')
+} catch {[IO.File]::WriteAllText((Join-Path $Root 'system-error.txt'),($_ | Out-String));exit 1}
+finally {if($adminLock){$adminLock.Dispose()};if($systemLock){$systemLock.Dispose()}}
+'@
+        [IO.File]::WriteAllText($probe,$code,[Text.UTF8Encoding]::new($true))
+        $taskName='SentinelLocal-CI-Mutex-'+[guid]::NewGuid().ToString('N')
+        $adminLock=$null;$systemLock=$null;$registered=$false
+        try {
+            $adminLock=Enter-SentinelLogLock (Join-Path $root 'admin-created.jsonl');$adminLock.ReleaseMutex()
+            $action=New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Root "{1}"' -f $probe,$root)
+            $principal=New-ScheduledTaskPrincipal -UserId SYSTEM -LogonType ServiceAccount -RunLevel Highest
+            $settings=New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 1) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+            Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings | Out-Null;$registered=$true
+            Start-ScheduledTask -TaskName $taskName
+            $timer=[Diagnostics.Stopwatch]::StartNew()
+            while(-not (Test-Path -LiteralPath (Join-Path $root 'system-ready.txt'))) {
+                if(Test-Path -LiteralPath (Join-Path $root 'system-error.txt')){throw (Get-Content (Join-Path $root 'system-error.txt') -Raw)}
+                if($timer.Elapsed.TotalSeconds -gt 30){throw 'SYSTEM did not open the administrator-created mutex.'}
+                Start-Sleep -Milliseconds 100
+            }
+            $systemLock=Enter-SentinelLogLock (Join-Path $root 'system-created.jsonl');$systemLock.ReleaseMutex()
+            $owner=$systemLock.GetAccessControl().GetOwner([Security.Principal.SecurityIdentifier]).Value
+            Assert ($owner -eq 'S-1-5-32-544') 'SYSTEM-created mutex owner was not administrators'
+            [IO.File]::WriteAllText((Join-Path $root 'admin-done.txt'),'Administrator acquired SYSTEM-created lock')
+            while(-not (Test-Path -LiteralPath (Join-Path $root 'system-done.txt'))) {
+                if(Test-Path -LiteralPath (Join-Path $root 'system-error.txt')){throw (Get-Content (Join-Path $root 'system-error.txt') -Raw)}
+                if($timer.Elapsed.TotalSeconds -gt 40){throw 'SYSTEM handshake did not complete.'}
+                Start-Sleep -Milliseconds 100
+            }
+        } finally {
+            if($registered){Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue;Unregister-ScheduledTask -TaskName $taskName -Confirm:$false}
+            if($adminLock){$adminLock.Dispose()};if($systemLock){$systemLock.Dispose()}
+        }
+    }
     Test 'Real protected staging copies verified bytes and rejects post-stage tampering' {
         $root=Package 'secure-stage';$stage=& $bootstrap -PackageRoot $root -Mode Stage -DevelopmentUnsigned -ExpectedManifestSHA256 (Get-FileHash (Join-Path $root 'package.manifest.json')).Hash -StagingRoot (Join-Path $protected 'stages')
         $acl=Get-Acl $stage.StageRoot;Assert $acl.AreAccessRulesProtected 'Stage inherited unsafe ACL'

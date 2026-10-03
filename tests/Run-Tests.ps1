@@ -216,6 +216,25 @@ Run-Test 'Audit export creates independently verifiable snapshots' {
     $failed=$false; try { & (Get-SentinelSourcePath $packageRoot 'Export-SentinelAudit.ps1') -Root $root -DestinationPath (Join-Path $root 'self-export') | Out-Null } catch { $failed=$true }
     Assert $failed 'Export recursively targeted installation folder'
 }
+Run-Test 'Audit export handles deep destinations without extending target names past MAX_PATH' {
+    $root=New-ProbeRoot 'export-deep';$path=Join-Path $root 'logs\administration.jsonl';Add-Probe $path 1
+    $sourceCheckpoint=Get-SentinelChainPath $path
+    $beforeLog=(Get-FileHash -LiteralPath $path).Hash;$beforeState=(Get-FileHash -LiteralPath $sourceCheckpoint).Hash
+    # The exported checkpoint itself fits the legacy API limit, but appending
+    # a GUID to its name (the old atomic-write scheme) would exceed 259 chars.
+    $stageName='.pending-'+$env:COMPUTERNAME+'-20000101T000000000-'+('0'*32)
+    $targetDestinationLength=198-1-$stageName.Length-'\state\log-chain'.Length
+    $padding=$targetDestinationLength-$ScratchRoot.Length-1
+    Assert ($padding -gt 0) 'Scratch root is too deep for the path fixture'
+    $destination=Join-Path $ScratchRoot ('d'*$padding)
+    $snapshot=& (Get-SentinelSourcePath $packageRoot 'Export-SentinelAudit.ps1') -Root $root -DestinationPath $destination
+    $exported=Join-Path $snapshot 'logs\administration.jsonl'
+    $state=Get-SentinelChainPath $exported
+    Assert ((Get-SentinelLogVerification $exported).Valid) 'Deep exported chain failed verification'
+    Assert ((Get-FileHash -LiteralPath $exported).Hash -eq $beforeLog -and (Test-Path -LiteralPath $state)) 'Deep export lost bytes or checkpoint'
+    Assert ((Get-FileHash -LiteralPath $path).Hash -eq $beforeLog -and (Get-FileHash -LiteralPath $sourceCheckpoint).Hash -eq $beforeState) 'Export rewrote source log/checkpoint'
+    Assert (@(Get-ChildItem -LiteralPath $snapshot -Recurse -Force -Filter '*.tmp').Count -eq 0) 'Atomic export left temporary files'
+}
 Run-Test 'Self-generated response command cannot cause a scan feedback loop' {
     $root=New-ProbeRoot 'internal-response'; $task=Join-Path $root 'Invoke-SentinelResponse.ps1'; Copy-Item -LiteralPath (Get-SentinelSourcePath $packageRoot 'Invoke-SentinelResponse.ps1') -Destination $task
     foreach($name in Get-SentinelCriticalFileNames) {Copy-Item -LiteralPath (Get-SentinelSourcePath $packageRoot $name) -Destination (Join-Path $root $name) -Force}

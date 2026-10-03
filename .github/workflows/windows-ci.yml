@@ -45,9 +45,37 @@ jobs:
         run: |
           & .\scripts\SelfTest-SentinelLocal.ps1 -Root $env:GITHUB_WORKSPACE -PreStart
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Offline evaluation aggregation tests (synthetic records only)
+        run: |
+          & .\tests\Run-EvaluationTests.ps1 -ScratchRoot (Join-Path $env:RUNNER_TEMP 'SentinelLocal-evaluation-tests')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Watcher startup regressions (mocked telemetry, no installation)
+        run: |
+          & .\tests\Run-WatcherStartupTests.ps1 -ScratchRoot (Join-Path $env:RUNNER_TEMP 'SentinelLocal-watcher-startup-tests')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Evaluation readiness tests (read-only probes and fixtures)
+        run: |
+          & .\tests\Run-EvaluationReadinessTests.ps1 -ScratchRoot (Join-Path $env:RUNNER_TEMP 'SentinelLocal-evaluation-readiness-tests')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Benign observation recording tests
+        run: |
+          & .\tests\Run-BenignObservationTests.ps1 -ScratchRoot (Join-Path $env:RUNNER_TEMP 'SentinelLocal-benign-observation-tests')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Verify clean diff
         run: |
           git diff --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Bounded benign measurement regressions
+        run: |
+          & .\tests\Run-BenignBenchmarkTests.ps1 -ScratchRoot (Join-Path $env:RUNNER_TEMP 'SentinelLocal-benchmark-tests')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Durable process identity regressions
+        run: |
+          & .\tests\Run-SysmonProcessTests.ps1 -ScratchRoot (Join-Path $env:RUNNER_TEMP 'SentinelLocal-sysmon-process-tests')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Real Sysmon process creation integration (ephemeral CI VM)
+        run: |
+          & .\tests\Run-SysmonIntegration.ps1 -ScratchRoot (Join-Path $env:RUNNER_TEMP 'SentinelLocal-sysmon-integration')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload test results
         if: always()
@@ -58,5 +86,13 @@ jobs:
             ${{ runner.temp }}/SentinelLocal-tests/test-results.json
             ${{ runner.temp }}/SentinelLocal-pilot-tests/test-results.json
             ${{ runner.temp }}/SentinelLocal-security-tests/test-results.json
+            ${{ runner.temp }}/SentinelLocal-evaluation-tests/test-results.json
+            ${{ runner.temp }}/SentinelLocal-evaluation-readiness-tests/test-results.json
+            ${{ runner.temp }}/SentinelLocal-watcher-startup-tests/test-results.json
+            ${{ runner.temp }}/SentinelLocal-benign-observation-tests/test-results.json
+            ${{ runner.temp }}/SentinelLocal-benchmark-tests/test-results.json
+            ${{ runner.temp }}/SentinelLocal-sysmon-process-tests/test-results.json
+            ${{ runner.temp }}/SentinelLocal-sysmon-integration/test-results.json
+            ${{ runner.temp }}/SentinelLocal-sysmon-integration/captured-processes.json
           if-no-files-found: warn
           retention-days: 14
