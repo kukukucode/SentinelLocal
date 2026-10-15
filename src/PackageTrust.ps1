@@ -1,6 +1,6 @@
 ﻿function Get-SentinelPackagePath {
     param([string]$Root,[string]$Name)
-    if($Name -notin @(Get-SentinelPackageFiles) -and $Name -notin @('README.md','README_JP.txt','CHANGELOG.txt','docs/OPERATIONS_JP.md','docs/PILOT_JP.md','docs/REPOSITORY_JP.md','docs/SECURITY_JP.md')) { throw 'Unexpected package path.' }
+    if($Name -notin @(Get-SentinelPackageFiles) -and $Name -notin @('README.md','README_JP.txt','CHANGELOG.txt','docs/OPERATIONS_JP.md','docs/PILOT_JP.md','docs/REPOSITORY_JP.md','docs/SECURITY_JP.md','docs/EVALUATION_JP.md')) { throw 'Unexpected package path.' }
     $base=[IO.Path]::GetFullPath($Root).TrimEnd('\')+'\'
     $path=Get-SentinelSourcePath $Root $Name
     if(-not $path.StartsWith($base,[StringComparison]::OrdinalIgnoreCase)) { throw 'Package path escaped root.' }

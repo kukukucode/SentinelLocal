@@ -13,7 +13,7 @@ param(
 )
 $ErrorActionPreference='Stop'
 $required=@('Common.ps1','LogIntegrity.ps1','OperationalSafety.ps1','Deployment.ps1','PackageTrust.ps1','DetectionSafety.ps1','TaskIntegrity.ps1','PolicyManagement.ps1','Test-SentinelReadiness.ps1','Export-SentinelReport.ps1','Set-SentinelPolicy.ps1','New-SentinelPackage.ps1','Verify-SentinelPackage.ps1','EventMonitoring.ps1','ResponseExecution.ps1','SysmonMonitoring.ps1','Status.ps1','Config.json','DefenderHealth.ps1','DefenderHardening.ps1','Restore-DefenderBackup.ps1','Response.ps1','Invoke-SentinelResponse.ps1','ResponseWorker.ps1','Watcher.ps1','Check-SentinelLocal.ps1','Show-SentinelStatus.ps1','Export-SentinelAudit.ps1','Test-SentinelRemoteHealth.ps1','Add-SentinelException.ps1','SelfTest-SentinelLocal.ps1','Clear-SentinelFirewallRules.ps1','IntegrityMonitor.ps1','Update-SentinelIntegrityBaseline.ps1','Verify-SentinelLogs.ps1','Install-SentinelLocal.ps1','Upgrade-SentinelLocal.ps1','Uninstall-SentinelLocal.ps1')
-$optional=@('README.md','README_JP.txt','CHANGELOG.txt','docs/OPERATIONS_JP.md','docs/PILOT_JP.md','docs/REPOSITORY_JP.md','docs/SECURITY_JP.md')
+$optional=@('README.md','README_JP.txt','CHANGELOG.txt','docs/OPERATIONS_JP.md','docs/PILOT_JP.md','docs/REPOSITORY_JP.md','docs/SECURITY_JP.md','docs/EVALUATION_JP.md')
 $handles=[Collections.Generic.List[IDisposable]]::new()
 function Assert-NoReparse([string]$Path) {
     $p=[IO.Path]::GetFullPath($Path)

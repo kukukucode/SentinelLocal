@@ -1,5 +1,5 @@
 ﻿function Read-SentinelSysmon {
-    param([string]$Root,$Config,[scriptblock]$ScoreProcess,[scriptblock]$QueueResponse)
+    param([string]$Root,$Config,[scriptblock]$ScoreProcess,[scriptblock]$QueueResponse,[ValidateRange(1,60)][int]$MaximumProcessingSeconds=10)
     if(-not $Config.Sysmon.Enabled) {return}
     $cursorPath=Join-Path $Root 'state\sysmon-cursor.json';$cachePath=Join-Path $Root 'state\sysmon-correlations.json'
     $cursor=0L;$time='';$cache=@{}
@@ -12,12 +12,13 @@
         if(@($saved.Processes).Count -gt 1000) {throw 'Sysmon correlation cache limit exceeded.'}
         foreach($row in @($saved.Processes)) {if($row.Process.ProcessGuid){$cache[[string]$row.Process.ProcessGuid]=$row}}
     }
-    $batch=Get-SentinelEventBatch -LogName 'Microsoft-Windows-Sysmon/Operational' -Cursor $cursor -CursorTime $time -Ids @(1,3,19,20,21,22,25) -BatchSize ([int]$Config.EventBatchSize)
+    $batch=Get-SentinelEventBatch -LogName 'Microsoft-Windows-Sysmon/Operational' -Cursor $cursor -CursorTime $time -Ids @(1,3,4,16,19,20,21,22,25,255) -BatchSize ([int]$Config.EventBatchSize)
     if($batch.Reset) {
         if(-not (Write-SentinelJsonLine (Join-Path $Root 'logs\alerts.jsonl') ([ordered]@{Type='EventLogCursorReset';Severity='HIGH';Log='Sysmon';PreviousCursor=$cursor}))) {throw 'Cannot persist Sysmon cursor reset.'}
         $cache=@{};Write-SentinelAtomicJson $cachePath ([ordered]@{Processes=@()})
         Write-SentinelAtomicJson $cursorPath ([ordered]@{RecordId=0L;TimeCreated=''})
     }
+    $processingStarted=Get-SentinelSysmonMonotonicSeconds
     foreach($event in @($batch.Events)) {
         $data=Get-SentinelEventData $event
         if(-not (Write-SentinelJsonLine (Join-Path $Root 'logs\sysmon-events.jsonl') ([ordered]@{Type='SysmonEvent';EventId=$event.Id;RecordId=$event.RecordId;EventTime=$event.TimeCreated.ToString('o');Data=$data}))) {throw 'Cannot persist Sysmon event.'}
@@ -25,8 +26,9 @@
         $cutoff=([datetime]$event.TimeCreated).AddHours(-1)
         foreach($key in @($cache.Keys)) {if([datetimeoffset]::Parse([string]$cache[$key].SeenAt).LocalDateTime -lt $cutoff){$cache.Remove($key)}}
         if($event.Id -eq 1) {
-            $hashMatch=[regex]::Match([string]$data.Hashes,'(?i)(?:^|,)SHA256=([a-f0-9]{64})(?:,|$)')
-            $process=[pscustomobject]@{ProcessId=[int]$data.ProcessId;ParentProcessId=[int]$data.ParentProcessId;ExecutablePath=[string]$data.Image;Name=[IO.Path]::GetFileName([string]$data.Image);CommandLine=[string]$data.CommandLine;CreationDate=([datetime]::Parse([string]$data.UtcTime,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::AssumeUniversal)).ToUniversalTime().ToString('o');ProcessGuid=[string]$data.ProcessGuid;ObservedSHA256=if($hashMatch.Success){$hashMatch.Groups[1].Value}else{''}}
+            $process=ConvertFrom-SentinelSysmonProcess $data
+            $complete=$process.ProcessId -gt 0 -and [IO.Path]::IsPathRooted($process.ExecutablePath) -and $process.CommandLine -and $process.ProcessGuid -and $process.ObservedSHA256
+            if(-not (Write-SentinelJsonLine (Join-Path $Root 'logs\process-events.jsonl') ([ordered]@{Type='ProcessCreated';Source='Sysmon';RecordId=$event.RecordId;EventTime=$event.TimeCreated.ToString('o');MetadataComplete=[bool]$complete;Process=$process}))) {throw 'Cannot persist recorded process identity.'}
             $score=& $ScoreProcess $process
             if($score.Score -ge [int]$Config.ScorePolicy.DefenderCustomScan -and -not (Test-SentinelException -Path $process.ExecutablePath -Config $Config)) {& $QueueResponse $process.ExecutablePath $process.ProcessId $score $process}
             if($score.Score -gt 0 -and $Config.ScanReferencedScripts) {
@@ -35,7 +37,8 @@
                 $decoded=Save-SentinelDecodedCommand -Root $Root -CommandLine $process.CommandLine -ExecutablePath $process.ExecutablePath
                 if($decoded) {& $QueueResponse $decoded 0 $scriptScore $null}
             }
-            if($process.ProcessGuid) {
+            # Zero-score metadata is already durable; cache correlation candidates only.
+            if($process.ProcessGuid -and $score.Score -gt 0) {
                 $cache[$process.ProcessGuid]=[pscustomobject]@{Process=$process;BaseScore=[int]$score.Score;Reasons=@($score.Reasons);NetworkSeen=$false;DnsSeen=$false;SeenAt=$event.TimeCreated.ToString('o')}
             }
         } elseif($event.Id -in @(3,22)) {
@@ -54,6 +57,8 @@
                     }
                 }
             }
+        } elseif($event.Id -eq 255) {
+            if(-not (Write-SentinelJsonLine (Join-Path $Root 'logs\alerts.jsonl') ([ordered]@{Type='SysmonTelemetryError';Severity='HIGH';RecordId=$event.RecordId;EventTime=$event.TimeCreated.ToString('o');Data=$data;Reason='Provider reported a telemetry error; do not assume complete process observation.'}))) {throw 'Cannot persist Sysmon telemetry error.'}
         } elseif($event.Id -in @(19,20,21,25)) {
             $kind=if($event.Id -eq 25){'SysmonProcessTampering'}else{'SysmonWmiPersistence'}
             if(-not (Write-SentinelJsonLine (Join-Path $Root 'logs\alerts.jsonl') ([ordered]@{Type=$kind;Severity='HIGH';EventId=$event.Id;RecordId=$event.RecordId;Data=$data;Reason='Suspicious telemetry requires review; no heuristic process termination.'}))) {throw 'Cannot persist Sysmon detection.'}
@@ -72,5 +77,40 @@
         # Save correlation before cursor. A queue/log failure leaves this durable event retryable.
         Write-SentinelAtomicJson $cachePath ([ordered]@{Processes=@($cache.Values)})
         Write-SentinelAtomicJson $cursorPath ([ordered]@{RecordId=[long]$event.RecordId;TimeCreated=$event.TimeCreated.ToString('o')})
+        # Yield only after this event is fully durable. A large backlog must not
+        # monopolize the Watcher loop and starve heartbeat/Defender/health work.
+        # One event (or the source query) can still exceed the cooperative budget.
+        if((Get-SentinelSysmonMonotonicSeconds)-$processingStarted -ge $MaximumProcessingSeconds){break}
+    }
+}
+
+function Get-SentinelSysmonMonotonicSeconds {
+    return [double][Diagnostics.Stopwatch]::GetTimestamp()/[Diagnostics.Stopwatch]::Frequency
+}
+
+function Initialize-SentinelProcessMonitor {
+    param($Config)
+    if(-not $Config.Sysmon.Enabled) {
+        Register-CimIndicationEvent -Query 'SELECT * FROM Win32_ProcessStartTrace' -SourceIdentifier 'SentinelLocal.ProcessStart' -ErrorAction Stop | Out-Null
+        return 'CIM'
+    }
+    $services=@(Get-Service -Name Sysmon,Sysmon64 -ErrorAction SilentlyContinue | Where-Object Status -eq Running)
+    $channel=Get-WinEvent -ListLog 'Microsoft-Windows-Sysmon/Operational' -ErrorAction Stop
+    if(-not $services.Count -or -not $channel.IsEnabled) {throw 'Sysmon process monitoring requires a running service and enabled readable event channel.'}
+    return 'Sysmon'
+}
+
+function ConvertFrom-SentinelSysmonProcess {
+    param($Data)
+    $hashMatch=[regex]::Match([string]$Data.Hashes,'(?i)(?:^|,)SHA256=([a-f0-9]{64})(?:,|$)')
+    # Only recorded creation data: never query a possibly exited/reused PID here.
+    return [pscustomobject]@{
+        ProcessId=[int]$Data.ProcessId;ParentProcessId=[int]$Data.ParentProcessId
+        ExecutablePath=[string]$Data.Image;Name=[IO.Path]::GetFileName([string]$Data.Image)
+        CommandLine=[string]$Data.CommandLine
+        CreationDate=([datetime]::Parse([string]$Data.UtcTime,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::AssumeUniversal)).ToUniversalTime().ToString('o')
+        ProcessGuid=[string]$Data.ProcessGuid;ParentProcessGuid=[string]$Data.ParentProcessGuid
+        ObservedSHA256=if($hashMatch.Success){$hashMatch.Groups[1].Value}else{''}
+        IdentitySource='SysmonProcessCreate';LiveIdentityVerified=$false
     }
 }

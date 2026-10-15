@@ -4,7 +4,10 @@ function Write-SentinelAtomicJson {
     param([string]$Path,$Data)
     $parent = Split-Path -Parent $Path
     New-Item -ItemType Directory -Path $parent -Force | Out-Null
-    $temp = $Path + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+    # Keep the random temporary name independent of the target's basename.
+    # Appending to a long checkpoint name can exceed legacy .NET MAX_PATH even
+    # when the final destination is valid. The same parent preserves atomicity.
+    $temp = Join-Path $parent ('.sl-' + [guid]::NewGuid().ToString('N') + '.tmp')
     try {
         $encoding=[System.Text.UTF8Encoding]::new($true)
         $bytes = $encoding.GetPreamble() + $encoding.GetBytes((ConvertTo-Json -InputObject $Data -Depth 20 -Compress))
@@ -24,8 +27,39 @@ function Get-SentinelChainPath {
 function Enter-SentinelLogLock {
     param([string]$Path)
     $suffix = (Get-SentinelStringHash ([IO.Path]::GetFullPath($Path).ToLowerInvariant())).Substring(0,24)
-    $mutex = [System.Threading.Mutex]::new($false,('Global\SentinelLocalLog_' + $suffix))
+    # Default kernel-object permissions depend on the creator's token. A SYSTEM
+    # writer and an elevated administrator must share the same transaction lock.
+    # Supply permissions at creation, without a create-then-set-ACL race.
+    $security = [Security.AccessControl.MutexSecurity]::new()
+    $security.SetAccessRuleProtection($true,$false)
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     try {
+        $privileged = ([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) -or $identity.User.Value -eq 'S-1-5-18'
+        $allowed = @('S-1-5-18','S-1-5-32-544')
+        # Non-elevated development fixtures remain usable by their creator.
+        # Elevated production locks never grant the administrator's user SID:
+        # that would also grant the same user's non-elevated processes access.
+        if (-not $privileged) { $allowed += $identity.User.Value }
+        $owner = if ($privileged) { 'S-1-5-32-544' } else { $identity.User.Value }
+        $security.SetOwner([Security.Principal.SecurityIdentifier]::new($owner))
+        foreach ($sid in $allowed) {
+            $security.AddAccessRule([Security.AccessControl.MutexAccessRule]::new([Security.Principal.SecurityIdentifier]::new($sid),[Security.AccessControl.MutexRights]::FullControl,[Security.AccessControl.AccessControlType]::Allow))
+        }
+    } finally { $identity.Dispose() }
+    $created = $false
+    $mutex = [System.Threading.Mutex]::new($false,('Global\SentinelLocalLog_' + $suffix),[ref]$created,$security)
+    try {
+        # Constructor security is ignored for an already existing named object.
+        # Refuse a legacy or pre-created production lock with a weaker ACL;
+        # never resecure an object while another process might own a handle.
+        if ($privileged) {
+            $actual = $mutex.GetAccessControl()
+            $rules = @($actual.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
+            if (-not $actual.AreAccessRulesProtected -or $actual.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-32-544' -or $rules.Count -ne 2) { throw 'Log mutex has an unexpected owner or access policy; restart components after a verified upgrade.' }
+            foreach ($sid in @('S-1-5-18','S-1-5-32-544')) {
+                if (@($rules | Where-Object { $_.IdentityReference.Value -eq $sid -and $_.AccessControlType -eq 'Allow' -and $_.MutexRights -eq 'FullControl' }).Count -ne 1) { throw 'Log mutex has an unexpected access policy; restart components after a verified upgrade.' }
+            }
+        }
         try { $locked = $mutex.WaitOne([TimeSpan]::FromSeconds(10)) }
         catch [System.Threading.AbandonedMutexException] { $locked = $true }
         if (-not $locked) { throw 'Timed out waiting for log lock.' }

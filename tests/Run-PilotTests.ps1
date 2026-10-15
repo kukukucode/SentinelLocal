@@ -305,7 +305,7 @@ Test 'Upgrade startup failure restores old files baseline and task states' {
     function New-EventLog { param($LogName,$Source) }
     function New-ScheduledTaskTrigger { param([switch]$AtStartup) @{} }
     function New-ScheduledTaskPrincipal { param($UserId,$LogonType,$RunLevel) @{} }
-    function New-ScheduledTaskSettingsSet { param($RestartCount,$RestartInterval,$ExecutionTimeLimit,[switch]$StartWhenAvailable) @{} }
+    function New-ScheduledTaskSettingsSet { param($RestartCount,$RestartInterval,$ExecutionTimeLimit,[switch]$StartWhenAvailable,[switch]$AllowStartIfOnBatteries,[switch]$DontStopIfGoingOnBatteries) @{} }
     function New-ScheduledTaskAction { param($Execute,$Argument) [pscustomobject]@{Execute=$Execute;Arguments=$Argument} }
     function Register-ScheduledTask {
         [CmdletBinding()]param($TaskName,$Xml,$Action,$Trigger,$Principal,$Settings,$Description,[switch]$Force)
