@@ -5,6 +5,13 @@ Microsoft Defenderを防御エンジンとして利用するHost IDS / Defender�
 独立アンチウイルス、Protected Process、カーネルEDRではありません。
 用途はWindows PC 1台の試験運用です。
 
+公開パッケージ: v1.2.1-preview.1（実行時Version 1.2.1）
+https://github.com/kukukucode/SentinelLocal/releases/tag/v1.2.1-preview.1
+Pre-releaseです。配布物・ハッシュ・既知の制限はdocs/REPOSITORY_JP.md「公開版と配布物」を参照してください。
+v1.0.0は旧版で、新規導入非推奨です。
+Sysmon原本30/30件に対しSentinelの120秒以内保存0/30件という取り込み遅延があり、
+常用前の改善・評価が必要です。これはマルウェア検知率の測定値ではありません。
+
 導入・更新
 ----------
 配布payloadとは独立して信頼したBootstrapと署名者pinを用意し、

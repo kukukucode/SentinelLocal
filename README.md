@@ -1,4 +1,4 @@
-# SentinelLocal v1.2.1
+# SentinelLocal v1.2.1（Windows試験版）
 
 [![Windows CI](https://github.com/kukukucode/SentinelLocal/actions/workflows/windows-ci.yml/badge.svg)](https://github.com/kukukucode/SentinelLocal/actions/workflows/windows-ci.yml)
 
@@ -6,6 +6,10 @@
 Microsoft Defender、Windowsのタスクスケジューラ、イベントログ、Windows Firewallを利用します。LinuxやmacOSには対応していません。
 
 Microsoft Defenderを主防御エンジンとして利用する、軽量Host IDS / Defender補助コントローラーです。疑わしい対象をDefender Custom Scanへ渡し、Defenderの判定を優先します。独自アンチウイルス、Protected Process、カーネルEDRではありません。
+
+**公開中の試験版: [v1.2.1-preview.1](https://github.com/kukukucode/SentinelLocal/releases/tag/v1.2.1-preview.1)**。Windows向けの配布ZIP、独立したBootstrap、SHA-256一覧をReleaseから取得できます。[構成ガイド](docs/REPOSITORY_JP.md)の「公開版と配布物」を先に確認してください。GitHubの自動生成Source code ZIPは導入用パッケージとは配置が異なります。
+
+**既知の制限:** 正常コマンド30試行でSysmon原本は30/30件、Sentinelへの120秒以内の保存は0/30件でした。取り込みの滞留とログ容量管理は[Issue #6〜#12](https://github.com/kukukucode/SentinelLocal/issues?q=is%3Aissue%20is%3Aopen)で追跡しています。実マルウェアの防御性能は未測定で、常用前の評価・改善が必要です。
 
 ## リポジトリ構成
 
@@ -29,11 +33,11 @@ Microsoft Defenderを主防御エンジンとして利用する、軽量Host IDS
 - Microsoft Defenderと関連するPowerShellコマンドレットが利用できる環境
 - インストール、更新、Defender設定変更、保護されたログの閲覧を行うための管理者権限
 
-## バージョン
+## 配布版と開発状況
 
-このリポジトリの初回公開版は **v1.0.0** です。提供された`SentinelLocal-v2.5.zip`を基に、設定・スクリプト・ドキュメントのバージョン表記をv1.0.0に統一しています。
+現在の公開パッケージは **v1.2.1-preview.1**、実行時のVersionは **1.2.1** です。GitHub ReleaseはPre-releaseとして公開し、安定版・企業製品相当の防御能力を示すものではありません。配布物が対応するソースコミットはRelease添付の`release-metadata.json`で確認できます。ソースを参照する場合は公開タグの内容を使用してください。
 
-v1.1.0では、スキャン失敗の再試行、ログ削除検知、イベントの取りこぼし対策、応答処理のタイムアウトを追加しました。Windows用の状態画面と通知、期限付き例外、監査ログの外部出力、別PCからの死活確認、任意のSysmon連携にも対応しています。設定・運用方法は[運用ガイド](docs/OPERATIONS_JP.md)を参照してください。
+**v1.0.0は旧版で、新規導入非推奨です。** タグ・配布物・変更履歴は参照用に残します。更新されたBootstrapと保護stagingによる導入手順を使ってください。過去の版ごとの変更は[変更履歴](CHANGELOG.txt)、設定・運用方法は[運用ガイド](docs/OPERATIONS_JP.md)を参照してください。
 
 現在の **v1.2.1はWindows PC 1台向けの試験運用版** です。内容のハッシュによる再スキャン判定、再起動をまたぐ永続化比較、容量管理、更新の復元・起動確認、読み取り専用の診断、HTML/JSON調査レポート、設定の検証・復元、署名付きパッケージの検証に対応します。[個人PC試験運用ガイド](docs/PILOT_JP.md)を参照してください。
 
@@ -158,4 +162,4 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-EvaluationTe
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-EvaluationReadinessTests.ps1
 ```
 
-テストは一時フォルダーとモックを使用します。Defenderの実スキャン、インストール、OS設定変更は行いません。Windowsの実機・VMでのインストール後の検証は別途必要です。
+通常の回帰テストは一時フォルダーとモックを使用します。CIには、破棄可能なWindows VMで実Sysmonを導入・終了済みプロセス情報を照合し、最後にアンインストールする統合試験もあります。実マルウェアは使いません。Defenderの実スキャン、実PCの導入・長期運用・防御性能は別途検証が必要です。

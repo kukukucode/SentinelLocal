@@ -1,4 +1,6 @@
-Unreleased - evaluation foundation (2026-10-03)
+v1.2.1-preview.1 - Windows evaluation preview (2026-10-15)
+- Refresh public release guidance, provide the Windows flat package separately from its Bootstrap, and publish file checksums and source metadata. Runtime Version remains 1.2.1; this is a prerelease.
+- Preserve the original 30-trial result (native Sysmon 30/30, Sentinel persistence within 120 seconds 0/30); ingestion backlog and log rotation remain open in issues #6-#12. Malware efficacy remains unmeasured.
 - Sysmon backlog processing cooperatively yields after ten seconds at a completed durable event boundary, allowing the Watcher loop to service its heartbeat and other monitoring; later events resume from the saved cursor. An individual source query/event can still exceed the budget.
 - Benchmark preflight failures retain complete readiness evidence and print specific failed checks without launching commands; preflight-only mode allows diagnosis without trials, even on a healthy baseline.
 - Bounded benign measurement: 30 fixed Windows command launches, 120-second per-process observation windows, sampled runtime/configuration health and audit/Defender evidence collection. Reports scoped capture fraction and ingestion latency only; invalid observation remains N/A and alert attribution requires review.
