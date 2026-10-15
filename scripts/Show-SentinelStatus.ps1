@@ -37,7 +37,7 @@ $refresh={
         $status=Get-SentinelStatus -Root $Root
         $label.Text=('SentinelLocal {0} | {1} | {2} | {3}' -f $status.Version,$status.ComputerName,$status.CapturedAt,$(if($status.Healthy){'Healthy'}else{'Needs attention'}))
         $label.ForeColor=if($status.Healthy){[Drawing.Color]::DarkGreen}else{[Drawing.Color]::DarkRed}
-        $text.Text=($status.Components | Format-Table -AutoSize | Out-String)+($status.Queues | Format-Table -AutoSize | Out-String)+($status.Logs | Format-Table -AutoSize | Out-String)+($status.Storage | Format-List | Out-String)+($status.Defender | Format-List | Out-String)+"`r`nRecent alerts:`r`n"+($status.Alerts | ConvertTo-Json -Depth 8)
+        $text.Text=($status.Components | Format-Table -AutoSize | Out-String)+($status.Queues | Format-Table -AutoSize | Out-String)+($status.Logs | Format-Table -AutoSize | Out-String)+($status.SysmonBacklog | Format-List | Out-String)+($status.Storage | Format-List | Out-String)+($status.Defender | Format-List | Out-String)+"`r`nRecent alerts:`r`n"+($status.Alerts | ConvertTo-Json -Depth 8)
         if ($notify.Checked -and $script:initialized -and -not $status.Healthy -and $script:lastHealth -ne $false) { $tray.ShowBalloonTip(10000,'SentinelLocal','Monitoring or Defender needs attention.',[Windows.Forms.ToolTipIcon]::Warning) }
         foreach ($alert in $status.Alerts) {
             $key=if($alert._ChainHash){[string]$alert._ChainHash}else{[string]$alert.Timestamp+[string]$alert.Type}

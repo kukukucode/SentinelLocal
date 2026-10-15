@@ -1,4 +1,4 @@
-# Load reviewed repository code only. Never import scripts from the monitored installation.
+﻿# Load reviewed repository code only. Never import scripts from the monitored installation.
 $evaluationRepo=Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $evaluationRepo 'src\Common.ps1')
 
@@ -13,6 +13,7 @@ function Get-EvaluationSysmonService {
     if(-not $running.Count) { throw 'The required Sysmon service is not running.' }
     return @($running.Name)
 }
+function Get-EvaluationSysmonBacklog([string]$Root,$Config){Get-SentinelSysmonBacklog $Root $Config}
 function Get-EvaluationRuntimeTask([string]$Name) {
     return Get-ScheduledTask -TaskName $Name -TaskPath '\' -ErrorAction Stop
 }
@@ -29,30 +30,20 @@ function Get-EvaluationEventChannel([string]$Name) {
 }
 
 function Get-EvaluationLogAccess([string]$Root) {
-    $directory=Join-Path $Root 'logs'
-    $logs=@(Get-ChildItem -LiteralPath $directory -File -Filter '*.jsonl' -ErrorAction Stop)
-    $chainDirectory=Join-Path $Root 'state\log-chain'
-    $checkpoints=@(Get-ChildItem -LiteralPath $chainDirectory -File -Filter '*.jsonl.state' -ErrorAction Stop)
-    $names=@(@($logs.Name)+@($checkpoints | ForEach-Object { $_.Name.Substring(0,$_.Name.Length-6) }) | Sort-Object -Unique)
-    if(-not $names.Count) { throw 'No JSONL stream/checkpoint is available; log collection has not been demonstrated.' }
-    $streams=@(foreach($name in $names) {
-        $path=Join-Path $directory $name
-        $mutex=$null
-        try {
-            $mutex=Enter-SentinelLogLock $path
-            $statePath=Get-SentinelChainPath $path
-            if(Test-Path -LiteralPath ($statePath+'.pending')) { throw 'Pending log transaction; retry after the writer finishes. Diagnostics will not repair it.' }
-            $checkpoint=Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-            if($checkpoint.Schema -ne 2) { throw 'A schema 2 checkpoint is required; diagnostics will not migrate legacy state.' }
-            $snapshot=Get-SentinelLogSnapshot $path
-            if(-not (Test-SentinelSnapshotMatches $snapshot $checkpoint)) { throw ('Checkpoint mismatch for '+$name) }
-            [pscustomobject]@{Name=$name;LineCount=$snapshot.LineCount;ByteLength=$snapshot.ByteLength}
-        } finally { if($mutex) { $mutex.ReleaseMutex();$mutex.Dispose() } }
-    })
-    if(@($streams | Where-Object { $_.LineCount -gt 0 }).Count -eq 0) { throw 'Only empty logs are available; log collection has not been demonstrated.' }
-    return $streams
+    # Copy under short writer locks, then verify the copies. Parsing historical
+    # records while owning a production stream lock would itself stall capture.
+    $tempBase=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')+'\'
+    $stage=Join-Path $tempBase ('SentinelLocal-readiness-copy-'+[guid]::NewGuid().ToString('N'))
+    try {
+        $streams=@(Copy-SentinelLogSnapshot -Root $Root -Stage $stage)
+        if(@($streams | Where-Object {$_.LineCount -gt 0}).Count -eq 0){throw 'Only empty logs are available; log collection has not been demonstrated.'}
+        return $streams
+    }finally{
+        $resolved=[IO.Path]::GetFullPath($stage)
+        if(-not $resolved.StartsWith($tempBase,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($resolved) -notmatch '^SentinelLocal-readiness-copy-[a-f0-9]{32}$'){throw 'Unsafe readiness scratch cleanup path.'}
+        if(Test-Path -LiteralPath $resolved){Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction Stop}
+    }
 }
-
 function Get-SentinelEvaluationReadiness([string]$Root='C:\ProgramData\SentinelLocal',[datetimeoffset]$Now) {
     $fixedTime=$PSBoundParameters.ContainsKey('Now')
     if(-not $fixedTime) { $Now=Get-EvaluationCurrentTime }
@@ -133,6 +124,7 @@ function Get-SentinelEvaluationReadiness([string]$Root='C:\ProgramData\SentinelL
     if($config -and $config.Sysmon.Enabled) {
         Probe 'Sysmon service' { @(Get-EvaluationSysmonService) } {param($value) @($value).Count -gt 0} 'Sysmon must be running when it is the process observation source.'
         Probe 'Sysmon event channel' { Get-EvaluationEventChannel 'Microsoft-Windows-Sysmon/Operational' } {param($value) $value.Enabled} 'When Sysmon monitoring is enabled, its event channel must also be readable.'
+        Probe 'Sysmon ingestion/analysis backlog' { Get-EvaluationSysmonBacklog $rootPath $config } {param($value) $value.Status -eq 'Healthy'} 'Resolve source/analysis delay or unavailable analysis process; a fresh Watcher heartbeat alone does not establish timely observation.'
     }
     return [pscustomobject]@{
         Schema=1;CapturedAt=$Now.ToString('o');Root=$rootPath;ReadOnly=$true;PerformanceMeasured=$false

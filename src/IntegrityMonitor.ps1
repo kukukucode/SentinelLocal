@@ -64,15 +64,13 @@ function Alert-Once {
     )
 
     if ($lastAlerts.ContainsKey($Key) -and $lastAlerts[$Key] -eq $Fingerprint) { return }
-    $lastAlerts[$Key] = $Fingerprint
 
     $data = [ordered]@{
         Type=$Type
         Severity=$Severity
     }
     foreach ($field in $Fields.Keys) { $data[$field] = $Fields[$field] }
-    [void](Write-SentinelJsonLine -Path $alertLog -Data $data)
-    Save-LastAlerts
+    if(Write-SentinelJsonLine -Path $alertLog -Data $data){$lastAlerts[$Key] = $Fingerprint;Save-LastAlerts}
 }
 
 function Clear-AlertKey {
@@ -193,6 +191,19 @@ function Check-FileIntegrity {
     }
 }
 
+function Check-SysmonBacklog {
+    if(-not $config.Sysmon.Enabled){return}
+    $backlog=Get-SentinelSysmonBacklog $Root $config
+    $key='SysmonBacklog'
+    if($backlog.Status -eq 'Healthy'){
+        if($lastAlerts.ContainsKey($key)){
+            if(Write-SentinelJsonLine $alertLog ([ordered]@{Type='SysmonBacklogRecovered';Severity='INFO';Backlog=$backlog})){Clear-AlertKey $key}
+        }
+        return
+    }
+    Alert-Once -Key $key -Fingerprint ($backlog.Status+'|'+[math]::Floor([datetimeoffset]::Now.ToUnixTimeSeconds()/300)) -Type 'SysmonBacklogUnhealthy' -Severity 'HIGH' -Fields @{Status=$backlog.Status;Backlog=$backlog;Reason='Fresh component heartbeats do not establish timely source capture or analysis.'}
+}
+
 $lastHeartbeat = (Get-Date).AddSeconds(-1 * [int]$config.SelfDefense.HeartbeatSeconds)
 
 try {
@@ -204,6 +215,7 @@ try {
 
         Check-Tasks
         Check-Heartbeats
+        Check-SysmonBacklog
         Check-FileIntegrity
         foreach ($logCheck in @(Get-SentinelLogHealth $Root)) {
             if (-not $logCheck.Healthy) {

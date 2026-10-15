@@ -14,17 +14,7 @@ function Export-Snapshot {
     $stage=Join-Path $Destination ('.pending-'+$snapshotId)
     New-Item -ItemType Directory -Path $stage | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $stage 'logs'),(Join-Path $stage 'state\log-chain') | Out-Null
-    $files=@()
-    foreach ($log in @(Get-ChildItem -LiteralPath (Join-Path $Root 'logs') -Filter '*.jsonl' -File -ErrorAction Stop)) {
-        $mutex=Enter-SentinelLogLock $log.FullName
-        try {
-            $checkpoint=Get-SentinelLogCheckpoint $log.FullName
-            if (-not (Test-SentinelSnapshotMatches (Get-SentinelLogSnapshot $log.FullName) $checkpoint)) { throw ('Cannot export invalid log: '+$log.Name) }
-            Copy-Item -LiteralPath $log.FullName -Destination (Join-Path $stage ('logs\'+$log.Name))
-            Write-SentinelAtomicJson (Join-Path $stage ('state\log-chain\'+$log.Name+'.state')) $checkpoint
-            $files += [ordered]@{Name=$log.Name;SHA256=(Get-FileHash -LiteralPath $log.FullName -Algorithm SHA256).Hash;Length=$checkpoint.ByteLength;LastHash=$checkpoint.LastHash;LineCount=$checkpoint.LineCount}
-        } finally { $mutex.ReleaseMutex(); $mutex.Dispose() }
-    }
+    $files=@(Copy-SentinelLogSnapshot -Root $Root -Stage $stage)
     foreach ($heartbeatName in @('watcher-heartbeat.json','response-worker-heartbeat.json','integrity-monitor-heartbeat.json')) {
         $path=Join-Path $Root ('state\'+$heartbeatName)
         if (Test-Path -LiteralPath $path) { Copy-Item -LiteralPath $path -Destination (Join-Path $stage ('state\'+$heartbeatName)) }

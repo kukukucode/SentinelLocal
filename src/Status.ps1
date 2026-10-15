@@ -23,12 +23,11 @@
     foreach ($name in @('alerts.jsonl','errors.jsonl','defender-health-alerts.jsonl')) {
         $path=Join-Path $Root ('logs\'+$name)
         if (Test-Path -LiteralPath $path) {
-            foreach ($line in @(Get-Content -LiteralPath $path -Tail 20 -Encoding UTF8)) {
-                try { $alerts += $line | ConvertFrom-Json -ErrorAction Stop } catch { $alerts += [pscustomobject]@{Type='UnreadableLog';Severity='HIGH';Timestamp=(Get-Date).ToString('o');Error=$_.Exception.Message} }
-            }
+            try { $alerts += @(Read-SentinelLogRows $path -Tail 20) } catch { $alerts += [pscustomobject]@{Type='UnreadableLog';Severity='HIGH';Timestamp=(Get-Date).ToString('o');Error=$_.Exception.Message} }
         }
     }
     $logHealth=@(Get-SentinelLogHealth $Root)
+    $sysmonBacklog=if($config.Sysmon.Enabled){Get-SentinelSysmonBacklog $Root $config}else{[pscustomobject]@{Status='Disabled'}}
     try { $storage=Get-SentinelStorageStatus $Root $config } catch { $storage=[pscustomobject]@{Healthy=$false;Error=$_.Exception.Message} }
-    return [pscustomobject]@{Version=$config.Version;ComputerName=$env:COMPUTERNAME;CapturedAt=(Get-Date).ToString('o');Healthy=($storage.Healthy -and @($queues | Where-Object { $_.Queue -eq "failed" -and $_.Count -gt 0 }).Count -eq 0 -and @($components | Where-Object { -not $_.Healthy }).Count -eq 0 -and @($queues | Where-Object Delayed).Count -eq 0 -and @($logHealth | Where-Object { -not $_.Healthy }).Count -eq 0 -and $defender.AntivirusEnabled -and $defender.RealTimeProtection -and $defender.Mode -eq 'Normal');Storage=$storage;Components=$components;Queues=$queues;Logs=$logHealth;Defender=$defender;Alerts=@($alerts | Sort-Object Timestamp -Descending | Select-Object -First 30)}
+    return [pscustomobject]@{Version=$config.Version;ComputerName=$env:COMPUTERNAME;CapturedAt=(Get-Date).ToString('o');Healthy=($sysmonBacklog.Status -in @('Healthy','Disabled') -and $storage.Healthy -and @($queues | Where-Object { $_.Queue -eq "failed" -and $_.Count -gt 0 }).Count -eq 0 -and @($components | Where-Object { -not $_.Healthy }).Count -eq 0 -and @($queues | Where-Object Delayed).Count -eq 0 -and @($logHealth | Where-Object { -not $_.Healthy }).Count -eq 0 -and $defender.AntivirusEnabled -and $defender.RealTimeProtection -and $defender.Mode -eq 'Normal');SysmonBacklog=$sysmonBacklog;Storage=$storage;Components=$components;Queues=$queues;Logs=$logHealth;Defender=$defender;Alerts=@($alerts | Sort-Object Timestamp -Descending | Select-Object -First 30)}
 }

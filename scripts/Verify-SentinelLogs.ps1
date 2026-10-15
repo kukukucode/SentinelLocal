@@ -23,6 +23,10 @@ if ($ReferenceManifestPath) {
         if ([string]$entry.Name -notmatch '^[A-Za-z0-9_.-]+\.jsonl$') { throw 'Invalid manifest log name.' }
         $path=Join-Path $logDir $entry.Name
         $match=(Test-Path -LiteralPath $path) -and ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -eq $entry.SHA256)
+        if($entry.PSObject.Properties['SegmentIndexSHA256']){
+            $index=(Get-SentinelChainPath $path)+'.segments.json'
+            $match=$match -and (Test-Path -LiteralPath $index) -and ((Get-FileHash -LiteralPath $index).Hash -eq $entry.SegmentIndexSHA256)
+        }
         $results += [pscustomobject]@{Log=$entry.Name;Valid=[bool]$match;Lines=$entry.LineCount;Detail='External manifest SHA-256 comparison (exact exported snapshot)'}
     }
 }
