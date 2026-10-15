@@ -72,7 +72,9 @@ Test 'Log mutex explicitly grants SYSTEM and administrators without broad access
 }
 Test 'Trusted bootstrap verifies bytes without importing payload code' {
     $root=Package 'bootstrap-valid';$r=VerifyDevelopment $root
-    Assert ($r.Valid -and $r.Files -eq @(Get-SentinelPackageFiles).Count+8) 'Valid package failed'
+    $documents=@('README.md','README_JP.txt','CHANGELOG.txt','docs/OPERATIONS_JP.md','docs/PILOT_JP.md','docs/REPOSITORY_JP.md','docs/SECURITY_JP.md','docs/EVALUATION_JP.md','docs/INGESTION_STORAGE_JP.md')
+    Assert ($r.Valid -and $r.Files -eq @(Get-SentinelPackageFiles).Count+$documents.Count) 'Valid package failed'
+    foreach($name in $documents){Assert (Test-Path -LiteralPath (Join-Path $root $name) -PathType Leaf) ('Package documentation missing: '+$name)}
     $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($bootstrap,[ref]$tokens,[ref]$errors)
     Assert ($errors.Count -eq 0) 'Bootstrap syntax failure'
     $imports=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.CommandAst] -and $n.InvocationOperator -eq 'Dot'},$true))
