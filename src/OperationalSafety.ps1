@@ -34,6 +34,7 @@
         if(($value -isnot [int] -and $value -isnot [long]) -or [long]$value -lt 1 -or [long]$value -gt 1000000) { throw ('Invalid resource policy: '+$key) }
     }
     if($Config.Resources.HighQueueReserve -ge $Config.Resources.MaxQueueCount) { throw 'High queue reserve must be below queue capacity.' }
+    if($Config.Resources.PSObject.Properties['MaxTotalLogMB']){$total=$Config.Resources.MaxTotalLogMB;if(($total -isnot [int] -and $total -isnot [long]) -or $total -lt $Config.Resources.MaxLogFileMB -or $total -gt 1000000){throw 'Invalid total log capacity.'}}
     foreach($key in @('NormalAgingSeconds','HighBurstLimit')) { $value=$Config.Scheduling.$key; if(($value -isnot [int] -and $value -isnot [long]) -or [long]$value -lt 1 -or [long]$value -gt 86400) { throw ('Invalid scheduling policy: '+$key) } }
     foreach($entry in @($Config.Exceptions)) {
         if($null -eq $entry -or [string]$entry.SHA256 -notmatch '^[A-Fa-f0-9]{64}$' -or -not ([string]$entry.Reason).Trim()) { throw 'Invalid exception identity/reason.' }
@@ -65,12 +66,13 @@ function Get-SentinelStorageStatus {
     if(Test-Path -LiteralPath $evidencePath) {
         foreach($file in @(Get-ChildItem -LiteralPath $evidencePath -File -Recurse -ErrorAction Stop)) { $evidenceBytes += $file.Length }
     }
-    $logOversize=@()
+    $logOversize=@();$logBytes=0L;$limits=Get-SentinelLogLimits $Config
     foreach($file in @(Get-ChildItem -LiteralPath (Join-Path $Root 'logs') -File -ErrorAction SilentlyContinue)) {
-        if($Config.Resources -and $file.Length -ge ([long]$Config.Resources.MaxLogFileMB*1MB)) { $logOversize += $file.Name }
+        if($file.Extension -eq '.jsonl'){$logBytes+=$file.Length}
+        if($Config.Resources -and $file.Length -gt ([long]$Config.Resources.MaxLogFileMB*1MB)) { $logOversize += $file.Name }
     }
-    $healthy=$null -ne $free -and $free -ge ([long]$Config.Resources.MinFreeDiskMB*1MB) -and $evidenceBytes -lt ([long]$Config.Resources.MaxEvidenceMB*1MB) -and $logOversize.Count -eq 0
-    return [pscustomobject]@{Healthy=[bool]$healthy;FreeBytes=$free;EvidenceBytes=$evidenceBytes;OversizeLogs=$logOversize;Error=$errorText}
+    $healthy=$null -ne $free -and $free -ge ([long]$Config.Resources.MinFreeDiskMB*1MB) -and $evidenceBytes -lt ([long]$Config.Resources.MaxEvidenceMB*1MB) -and $logOversize.Count -eq 0 -and $logBytes -lt $limits.TotalBytes
+    return [pscustomobject]@{Healthy=[bool]$healthy;FreeBytes=$free;EvidenceBytes=$evidenceBytes;OversizeLogs=$logOversize;LogBytes=$logBytes;MaxTotalLogBytes=$limits.TotalBytes;MaxLogFileBytes=$limits.FileBytes;Error=$errorText}
 }
 
 function Assert-SentinelStorage {

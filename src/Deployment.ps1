@@ -62,6 +62,7 @@ function Stop-SentinelDeploymentTasks {
         if([datetimeoffset]::Now -ge $deadline) { throw 'Scheduled tasks did not stop; deployment refused.' }
         Start-Sleep -Milliseconds 250
     } while($true)
+    Stop-SentinelSysmonAnalyzer $Root
     if($childId -gt 0) {
         $process=Get-CimInstance Win32_Process -Filter ("ProcessId="+$childId) -ErrorAction Stop
         if($process) {

@@ -1,5 +1,6 @@
 ﻿param(
-    [string]$Root = "C:\ProgramData\SentinelLocal"
+    [string]$Root = "C:\ProgramData\SentinelLocal",
+    [switch]$AnalysisOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,7 +21,8 @@ $state = Join-Path $Root "state"
 $evidence = Join-Path $Root "evidence"
 New-Item $logs,$state,$evidence -ItemType Directory -Force | Out-Null
 $watcherCreated=$false
-$watcherMutex=[Threading.Mutex]::new($true,'Global\SentinelLocalWatcher',[ref]$watcherCreated)
+if($AnalysisOnly){$watcherMutex=Enter-SentinelLogLock (Join-Path $state 'sysmon-analysis.owner');$watcherCreated=$true}
+else{$watcherMutex=[Threading.Mutex]::new($true,'Global\SentinelLocalWatcher',[ref]$watcherCreated)}
 if(-not $watcherCreated) { throw 'A SentinelLocal Watcher already owns this host; duplicate monitoring refused.' }
 
 $eventLog = Join-Path $logs "events.log"
@@ -40,7 +42,7 @@ $responseQueueHigh = Join-Path $responseQueueRoot "high"
 $responseQueueNormal = Join-Path $responseQueueRoot "normal"
 $responseQueueProcessing = Join-Path $responseQueueRoot "processing"
 $responseQueueFailed = Join-Path $responseQueueRoot "failed"
-$responseDedupeStatePath = Join-Path $state "response-path-dedupe.json"
+$responseDedupeStatePath = Join-Path $state $(if($AnalysisOnly){'response-path-dedupe-sysmon.json'}else{'response-path-dedupe.json'})
 New-Item $responseQueueHigh,$responseQueueNormal,$responseQueueProcessing,$responseQueueFailed -ItemType Directory -Force | Out-Null
 
 $responsePathDedupe = @{}
@@ -204,12 +206,13 @@ function Test-RandomishSegment {
 
 function Get-FileSignatureStatus {
     param([string]$Path)
-    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+    if (-not $Path) { return $null }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return 'Missing' }
     try {
-        return (Get-AuthenticodeSignature -FilePath $Path -ErrorAction Stop).Status
+        return Get-SentinelContentSignatureStatus $Path
     } catch {
         Write-SentinelError -Root $Root -Component "Watcher" -Operation "Read Authenticode signature" -Exception $_.Exception -Context @{Path=$Path} -Severity "MEDIUM"
-        return $null
+        return 'Unavailable'
     }
 }
 
@@ -360,9 +363,13 @@ function Queue-SentinelResponse {
 
         $baseName = "{0}_{1}.json" -f (Get-Date -Format "yyyyMMddHHmmssfff"),$requestId
         $finalPath = Join-Path $queueDirectory $baseName
-        $tempPath = "$finalPath.tmp"
-        $request | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath $tempPath -Encoding UTF8 -ErrorAction Stop
-        Move-Item -LiteralPath $tempPath -Destination $finalPath -Force -ErrorAction Stop
+        $publishMutex=Enter-SentinelLogLock (Join-Path $Root 'state\response-queue.publish')
+        try{
+            # Parent persistence and deferred Sysmon analysis are now separate
+            # producers. Recheck their shared capacity before atomic publish.
+            Assert-SentinelQueueCapacity -Root $Root -Config $config -Priority $priority
+            Write-SentinelAtomicJson $finalPath $request
+        }finally{$publishMutex.ReleaseMutex();$publishMutex.Dispose()}
 
         $responsePathDedupe[$pathKey] = [pscustomobject]@{LastQueued=$now;Score=$Score}
         Save-ResponsePathDedupe
@@ -941,6 +948,63 @@ function Check-UnresolvedDefenderDetections {
     }
 }
 
+if($AnalysisOnly){
+    $analysisHeartbeat=Join-Path $state 'sysmon-analysis-heartbeat.json'
+    $lastFailure=[datetimeoffset]::MinValue
+    function Write-AnalysisHeartbeat {
+        Write-SentinelAtomicJson $analysisHeartbeat ([ordered]@{Version=$config.Version;Status='Running';ProcessId=$PID;LastUpdated=[datetimeoffset]::Now.ToString('o')})
+    }
+    while($true){
+        Write-AnalysisHeartbeat
+        try{
+            $worked=Invoke-SentinelPendingSysmonAnalysis -Root $Root -Config $config -ScoreProcess {param($observed) Get-ProcessScore $observed} -QueueResponse {
+                param($path,$processIdValue,$score,$observed)
+                Queue-SentinelResponse -FilePath $path -ProcessIdValue $processIdValue -Score $score.Score -Reasons $score.Reasons -Source Sysmon -ObservedProcess $observed
+            } -Progress {param($completed) Write-AnalysisHeartbeat}
+            if(-not $worked){Start-Sleep -Seconds 1}
+        }catch{
+            if(([datetimeoffset]::Now-$lastFailure).TotalSeconds -ge 30){Write-SentinelError -Root $Root -Component SysmonAnalysis -Operation 'Evaluate durable batch' -Exception $_.Exception;$lastFailure=[datetimeoffset]::Now}
+            Start-Sleep -Seconds 2
+        }
+    }
+}
+
+$script:analysisChild=$null
+$script:analysisLastStart=[datetimeoffset]::MinValue
+function Ensure-SysmonAnalyzer {
+    if(-not $config.Sysmon.Enabled){return}
+    # Adopt a verified surviving helper after an abrupt parent restart. Bind
+    # its native handle and birth time before using it for lifecycle control.
+    if(-not $script:analysisChild){
+        try{
+            $beat=Get-Content -LiteralPath (Join-Path $state 'sysmon-analysis-heartbeat.json') -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            $recorded=Get-SentinelSysmonAnalysisProcess ([int]$beat.ProcessId)
+            if(Test-SentinelSysmonAnalysisIdentity $Root $beat $recorded){
+                $candidate=Get-Process -Id ([int]$beat.ProcessId) -ErrorAction Stop
+                [void]$candidate.Handle
+                if([math]::Abs(($candidate.StartTime.ToUniversalTime()-([datetime]$recorded.CreationDate).ToUniversalTime()).TotalMilliseconds) -le 1){$script:analysisChild=$candidate}else{$candidate.Dispose()}
+            }
+        }catch{}
+    }
+    if($script:analysisChild -and -not $script:analysisChild.HasExited){
+        $elapsed=([datetime]::UtcNow-$script:analysisChild.StartTime.ToUniversalTime()).TotalSeconds
+        if($elapsed -lt 30){return}
+        $lastProgressAge=$elapsed
+        try{$beat=Get-Content -LiteralPath (Join-Path $state 'sysmon-analysis-heartbeat.json') -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop;if([int]$beat.ProcessId -eq $script:analysisChild.Id){$lastProgressAge=([datetimeoffset]::Now-[datetimeoffset]$beat.LastUpdated).TotalSeconds}}catch{}
+        if($lastProgressAge -ge -5 -and $lastProgressAge -le [math]::Max(120,[int]$config.ResponseTimeoutSeconds)){return}
+        $script:analysisChild.Kill();[void]$script:analysisChild.WaitForExit(5000)
+        [void](Write-SentinelJsonLine $alertLog ([ordered]@{Type='SysmonAnalyzerRestart';Severity='HIGH';Reason='Owned analyzer stopped making progress; durable work retained.'}))
+    }
+    if($script:analysisChild){$script:analysisChild.Dispose();$script:analysisChild=$null}
+    if(([datetimeoffset]::Now-$script:analysisLastStart).TotalSeconds -lt 30){return}
+    $script:analysisLastStart=[datetimeoffset]::Now
+    $start=[Diagnostics.ProcessStartInfo]::new()
+    $start.FileName=Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $start.Arguments='-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Root "{1}" -AnalysisOnly' -f (Join-Path $PSScriptRoot 'Watcher.ps1'),$Root
+    $start.UseShellExecute=$false;$start.CreateNoWindow=$true
+    $script:analysisChild=[Diagnostics.Process]::Start($start)
+}
+
 try {
     $startupPhase='Load pending Defender detections'
     Load-PendingDefenderDetections
@@ -950,6 +1014,7 @@ try {
 
     $startupPhase='Register process-start monitor'
     $processMonitorMode=Initialize-SentinelProcessMonitor $config
+    Ensure-SysmonAnalyzer
 
     $startupPhase='Capture initial persistence snapshot'
     $initialSnapshot=Get-PersistenceSnapshot
@@ -1064,10 +1129,8 @@ while ($true) {
     Check-UnresolvedDefenderDetections
     if ($config.Sysmon.Enabled) {
         try {
-            Read-SentinelSysmon -Root $Root -Config $config -ScoreProcess {param($observed) Get-ProcessScore $observed} -QueueResponse {
-                param($path,$processIdValue,$score,$observed)
-                Queue-SentinelResponse -FilePath $path -ProcessIdValue $processIdValue -Score $score.Score -Reasons $score.Reasons -Source 'Sysmon' -ObservedProcess $observed
-            }
+            Ensure-SysmonAnalyzer
+            Receive-SentinelSysmonBatch -Root $Root -Config $config
         } catch { Write-SentinelError -Root $Root -Component Sysmon -Operation 'Read events' -Exception $_.Exception }
     }
 

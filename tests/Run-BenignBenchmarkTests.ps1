@@ -1,4 +1,4 @@
-param([string]$ScratchRoot=(Join-Path $env:TEMP ('SentinelLocal-benchmark-tests-'+[guid]::NewGuid().ToString('N'))))
+﻿param([string]$ScratchRoot=(Join-Path $env:TEMP ('SentinelLocal-benchmark-tests-'+[guid]::NewGuid().ToString('N'))))
 $ErrorActionPreference='Stop'
 $repo=Split-Path -Parent $PSScriptRoot
 . (Join-Path $repo 'tools\evaluation\BenignBenchmark.ps1')
@@ -43,6 +43,7 @@ Test 'Source errors and cleared cursors invalidate observation while unrelated m
     Assert-SentinelBenchmarkTelemetryWindow @([pscustomobject]@{EventId=255;EventTime=$start.AddSeconds(-20).ToString('o')}) @() @() $start $end
 }
 function Get-EvaluationSysmonService{if($script:ServiceStopped){throw 'Source stopped'};return @('Sysmon64')}
+function Get-EvaluationSysmonBacklog{[pscustomobject]@{Status='Healthy';SourcePendingEvents=0;AnalysisPendingEvents=0}}
 function Get-EvaluationRuntimeTask([string]$Name){$script:Tasks[$Name]}
 function Get-EvaluationDefenderState{[pscustomobject]@{Mode='Normal';Antivirus=$true;RealTime=(-not $script:DefenderStopped);Behavior=$true;EngineVersion='Fixture';SignatureVersion='Fixture'}}
 Test 'Health sampling validates live component identity freshness worker time and configuration' {

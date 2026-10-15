@@ -68,6 +68,7 @@
     "MinFreeDiskMB": 512,
     "MaxEvidenceMB": 2048,
     "MaxLogFileMB": 64,
+    "MaxTotalLogMB": 512,
     "StorageCheckSeconds": 5,
     "MaxSnapshotFileMB": 32
   },

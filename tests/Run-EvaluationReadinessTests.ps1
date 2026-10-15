@@ -1,4 +1,4 @@
-param([string]$ScratchRoot=(Join-Path $env:TEMP ('SentinelLocal-evaluation-readiness-tests-'+[guid]::NewGuid().ToString('N'))))
+﻿param([string]$ScratchRoot=(Join-Path $env:TEMP ('SentinelLocal-evaluation-readiness-tests-'+[guid]::NewGuid().ToString('N'))))
 $ErrorActionPreference='Stop'
 $repo=Split-Path -Parent $PSScriptRoot
 . (Join-Path $repo 'tools\evaluation\Readiness.ps1')
@@ -25,6 +25,7 @@ function Get-EvaluationRuntimeTask([string]$Name) {
 }
 function Get-EvaluationDefenderState { return $script:Defender }
 function Get-EvaluationSysmonService { if($script:SysmonError){throw 'Sysmon stopped (fixture)'};return @('Sysmon64') }
+function Get-EvaluationSysmonBacklog { [pscustomobject]@{Status=$script:BacklogStatus;SourcePendingEvents=0;AnalysisPendingEvents=0} }
 function Get-EvaluationEventChannel([string]$Name) {
     if($script:ChannelError -or ($script:SysmonError -and $Name -like '*Sysmon*')) { throw 'Event channel access denied (fixture)' }
     $script:Channels.Add($Name)
@@ -37,6 +38,7 @@ function Fixture([string]$Name) {
     foreach($file in @('Common.ps1','Watcher.ps1','ResponseWorker.ps1','IntegrityMonitor.ps1')) { Set-Content -LiteralPath (Join-Path $root $file) -Value "throw 'Installed payload must not execute during a read-only preflight.'" -Encoding UTF8 }
     $script:Processes=@{};$script:Tasks=@{};$script:ProcessError=$false;$script:ChannelError=$false;$script:SysmonError=$false
     $script:ClockTime=$now;$script:AdvanceProbeClock=$false
+    $script:BacklogStatus='Healthy'
     $script:Channels=[Collections.Generic.List[string]]::new()
     $script:Defender=[pscustomobject]@{Mode='Normal';Antivirus=$true;RealTime=$true;Behavior=$true;EngineVersion='Fixture';SignatureVersion='Fixture'}
     $components=@(
@@ -216,6 +218,15 @@ Run-Test 'CLI writes an unready report outside the installation and returns exit
     Assert ($invocation.ExitCode -eq 1) 'CLI overwrote an existing diagnostic'
     $invocation=Invoke-ReadinessCli $missing (Join-Path $missing 'reports')
     Assert ($invocation.ExitCode -eq 1 -and -not (Test-Path $missing)) 'CLI wrote into the monitored root'
+}
+Run-Test 'Fresh heartbeats cannot pass measurement readiness with delayed discontinuous or unverified ingestion' {
+    $root=Fixture 'backlog-health';$configPath=Join-Path $root 'Config.json';$configuration=Get-Content $configPath -Raw | ConvertFrom-Json;$configuration.Sysmon.Enabled=$true;Write-SentinelAtomicJson $configPath $configuration
+    $beatPath=Join-Path $root 'state\watcher-heartbeat.json';$beat=Get-Content $beatPath -Raw | ConvertFrom-Json;$beat | Add-Member NoteProperty ProcessMonitorMode Sysmon;Write-SentinelAtomicJson $beatPath $beat
+    foreach($status in @('Delayed','Discontinuity','Unverified')){
+        $script:BacklogStatus=$status;$report=Get-SentinelEvaluationReadiness $root $now
+        Assert (-not $report.ReadyForBenignTrials -and @($report.Checks | Where-Object {$_.Name -eq 'Sysmon ingestion/analysis backlog' -and $_.State -ne 'Pass'}).Count -eq 1) ('Backlog status accepted: '+$status)
+    }
+    $script:BacklogStatus='Healthy';Assert (Get-SentinelEvaluationReadiness $root $now).ReadyForBenignTrials 'Recovered backlog did not restore readiness.'
 }
 Run-Test 'A junction cannot redirect diagnostic output into the monitored installation' {
     $root=Fixture 'junction-target';$alias=Join-Path $ScratchRoot 'junction-alias'

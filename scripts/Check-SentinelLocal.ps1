@@ -71,6 +71,7 @@ function Show-Heartbeat {
 Show-Heartbeat -Title "Watcher heartbeat" -Path (Join-Path $Root "state\watcher-heartbeat.json") -StaleSeconds ([int]$config.HeartbeatStaleSeconds)
 Show-Heartbeat -Title "Response worker heartbeat" -Path (Join-Path $Root "state\response-worker-heartbeat.json") -StaleSeconds ([int]$config.ResponseWorkerHeartbeatStaleSeconds) -AllowBusyProcess
 Show-Heartbeat -Title "Integrity monitor heartbeat" -Path (Join-Path $Root "state\integrity-monitor-heartbeat.json") -StaleSeconds ([int]$config.SelfDefense.HeartbeatStaleSeconds)
+if($config.Sysmon.Enabled){Write-Host '=== Sysmon source and analysis backlog ===';Get-SentinelSysmonBacklog $Root $config | Format-List}
 
 Write-Host "=== Integrity baseline ==="
 $baseline = Join-Path $Root "state\integrity-baseline.json"
@@ -97,15 +98,15 @@ Format-List ThreatName,DidThreatExecute,IsActive,Resources
 
 Write-Host "`n=== Recent Sentinel alerts ==="
 $alerts = Join-Path $Root "logs\alerts.jsonl"
-if (Test-Path $alerts) { Get-Content $alerts -Tail 10 } else { Write-Host "(none)" }
+if (Test-Path $alerts) { Read-SentinelLogRows $alerts -Tail 10 | ConvertTo-Json -Depth 14 } else { Write-Host "(none)" }
 
 Write-Host "`n=== Recent Sentinel errors ==="
 $errors = Join-Path $Root "logs\errors.jsonl"
-if (Test-Path $errors) { Get-Content $errors -Tail 10 } else { Write-Host "(none)" }
+if (Test-Path $errors) { Read-SentinelLogRows $errors -Tail 10 | ConvertTo-Json -Depth 14 } else { Write-Host "(none)" }
 
 Write-Host "`n=== Defender health alerts ==="
 $health = Join-Path $Root "logs\defender-health-alerts.jsonl"
-if (Test-Path $health) { Get-Content $health -Tail 10 } else { Write-Host "(none)" }
+if (Test-Path $health) { Read-SentinelLogRows $health -Tail 10 | ConvertTo-Json -Depth 14 } else { Write-Host "(none)" }
 
 Write-Host "`n=== ASR/CFA/Network Protection event counts ==="
 foreach ($fileName in @("asr-events.jsonl","cfa-events.jsonl","network-protection-events.jsonl")) {

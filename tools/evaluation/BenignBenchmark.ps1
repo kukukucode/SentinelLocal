@@ -1,4 +1,4 @@
-. (Join-Path $PSScriptRoot 'BenignObservation.ps1')
+﻿. (Join-Path $PSScriptRoot 'BenignObservation.ps1')
 . (Join-Path $PSScriptRoot 'Evaluation.ps1')
 
 function Get-SentinelBenchmarkHealth([string]$Root,$Config) {
@@ -27,7 +27,9 @@ function Get-SentinelBenchmarkHealth([string]$Root,$Config) {
     }
     try {if((Get-FileHash (Join-Path $Root 'Config.json')).Hash -ne $script:BenchmarkConfigHash){throw 'Configuration changed.'};[void](Get-EvaluationSysmonService)}catch{$errors+=@($_.Exception.Message)}
     try {$defender=Get-EvaluationDefenderState;if($defender.Mode -ne 'Normal' -or -not $defender.Antivirus -or -not $defender.RealTime -or -not $defender.Behavior){throw 'Defender active protection is not healthy.'}}catch{$errors+=@($_.Exception.Message)}
-    return [pscustomobject]@{StartedAt=$started.ToString('o');EndedAt=[datetimeoffset]::Now.ToString('o');Healthy=($errors.Count -eq 0);Components=$components;Defender=$defender;Errors=$errors}
+    $backlog=Get-EvaluationSysmonBacklog $Root $Config
+    if($backlog.Status -ne 'Healthy'){$errors+=@('Sysmon source/analysis is '+$backlog.Status+': '+$backlog.Error)}
+    return [pscustomobject]@{StartedAt=$started.ToString('o');EndedAt=[datetimeoffset]::Now.ToString('o');Healthy=($errors.Count -eq 0);Components=$components;Defender=$defender;SysmonBacklog=$backlog;Errors=$errors}
 }
 
 function Get-SentinelBenchmarkSummary($Trials,$Records,[bool]$ObservationValid) {
@@ -54,7 +56,7 @@ function Get-SentinelBenchmarkSummary($Trials,$Records,[bool]$ObservationValid) 
 function Assert-SentinelBenchmarkTelemetryWindow($SourceEvents,$Alerts,$Errors,[datetimeoffset]$Start,[datetimeoffset]$End) {
     if(@($SourceEvents | Where-Object {$_.EventId -eq 255 -and [datetimeoffset]$_.EventTime -ge $Start -and [datetimeoffset]$_.EventTime -le $End}).Count){throw 'Sysmon reported a provider error in the observation window.'}
     if(@($Alerts | Where-Object {$_.Type -eq 'EventLogCursorReset' -and $_.Log -eq 'Sysmon' -and [datetimeoffset]$_.Timestamp -ge $Start -and [datetimeoffset]$_.Timestamp -le $End}).Count){throw 'Sysmon event-log continuity was lost during observation.'}
-    if(@($Errors | Where-Object {$_.Component -eq 'Sysmon' -and [datetimeoffset]$_.Timestamp -ge $Start -and [datetimeoffset]$_.Timestamp -le $End}).Count){throw 'Sentinel reported a Sysmon read/persistence failure during observation.'}
+    if(@($Errors | Where-Object {$_.Component -in @('Sysmon','SysmonAnalysis') -and [datetimeoffset]$_.Timestamp -ge $Start -and [datetimeoffset]$_.Timestamp -le $End}).Count){throw 'Sentinel reported a Sysmon read/persistence/analysis failure during observation.'}
 }
 
 function Export-SentinelBenchmarkSnapshot([string]$Root,[string]$Destination) {
@@ -62,20 +64,7 @@ function Export-SentinelBenchmarkSnapshot([string]$Root,[string]$Destination) {
     # an optional scripts/Common.ps1; diagnostics must not repair source logs.
     $stage=Join-Path $Destination ('.pending-'+[guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path (Join-Path $stage 'logs'),(Join-Path $stage 'state\log-chain') -Force | Out-Null
-    $entries=@()
-    foreach($log in @(Get-ChildItem -LiteralPath (Join-Path $Root 'logs') -Filter '*.jsonl' -File -ErrorAction Stop)){
-        $mutex=Enter-SentinelLogLock $log.FullName
-        try {
-            $statePath=Get-SentinelChainPath $log.FullName
-            if(Test-Path ($statePath+'.pending')){throw 'A source log transaction is pending; benchmark export will not repair it.'}
-            $checkpoint=Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
-            if($checkpoint.Schema -ne 2 -or -not (Test-SentinelSnapshotMatches (Get-SentinelLogSnapshot $log.FullName) $checkpoint)){throw ('Source log/checkpoint mismatch: '+$log.Name)}
-            $copy=Join-Path $stage ('logs\'+$log.Name)
-            Copy-Item -LiteralPath $log.FullName -Destination $copy -ErrorAction Stop
-            Write-SentinelAtomicJson (Get-SentinelChainPath $copy) $checkpoint
-            $entries+=@([ordered]@{Name=$log.Name;SHA256=(Get-FileHash $copy).Hash;Length=$checkpoint.ByteLength;LineCount=$checkpoint.LineCount;LastHash=$checkpoint.LastHash})
-        }finally{$mutex.ReleaseMutex();$mutex.Dispose()}
-    }
+    $entries=@(Copy-SentinelLogSnapshot -Root $Root -Stage $stage)
     if(-not $entries.Count){throw 'No source log streams were available.'}
     Write-SentinelAtomicJson (Join-Path $stage 'manifest.json') ([ordered]@{Schema=1;ComputerName=$env:COMPUTERNAME;CapturedAt=[datetimeoffset]::Now.ToString('o');ReadOnlySource=$true;Files=$entries})
     $complete=Join-Path $Destination ('snapshot-'+[guid]::NewGuid().ToString('N'))
@@ -149,11 +138,11 @@ function Invoke-SentinelBenignBenchmark([string]$Root,[string]$OutputDirectory,[
         $snapshot=Export-SentinelBenchmarkSnapshot $rootPath (Join-Path $output 'sentinel')
         $path=Join-Path $snapshot 'logs\process-events.jsonl'
         if(-not (Get-SentinelLogVerification $path).Valid){throw 'Process snapshot verification failed.'}
-        $records=@(Get-Content $path -Encoding UTF8 | ForEach-Object {$_ | ConvertFrom-Json})
-        $source=@(Get-Content (Join-Path $snapshot 'logs\sysmon-events.jsonl') -Encoding UTF8 | ForEach-Object {$_ | ConvertFrom-Json})
-        $alerts=@(Get-Content (Join-Path $snapshot 'logs\alerts.jsonl') -Encoding UTF8 -ErrorAction Stop | ForEach-Object {$_ | ConvertFrom-Json})
+        $records=@(Read-SentinelLogRows $path)
+        $source=@(Read-SentinelLogRows (Join-Path $snapshot 'logs\sysmon-events.jsonl'))
+        $alerts=@(Read-SentinelLogRows (Join-Path $snapshot 'logs\alerts.jsonl'))
         $sourceErrors=@();$errorPath=Join-Path $snapshot 'logs\errors.jsonl'
-        if(Test-Path $errorPath){$sourceErrors=@(Get-Content $errorPath -Encoding UTF8 -ErrorAction Stop | ForEach-Object {$_ | ConvertFrom-Json})}
+        if(Test-Path $errorPath){$sourceErrors=@(Read-SentinelLogRows $errorPath)}
         if($windowStart){Assert-SentinelBenchmarkTelemetryWindow $source $alerts $sourceErrors $windowStart $windowEnd}
         [void](Get-EvaluationEventChannel 'Microsoft-Windows-Windows Defender/Operational')
         if($windowStart){

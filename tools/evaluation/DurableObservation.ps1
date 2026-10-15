@@ -1,4 +1,4 @@
-. (Join-Path $PSScriptRoot 'Readiness.ps1')
+﻿. (Join-Path $PSScriptRoot 'Readiness.ps1')
 
 function Compare-SentinelDurableObservation($Packet,$Records) {
     if($Packet.Kind -ne 'BenignObservationPacket' -or -not $Packet.CommandsSucceeded -or @($Packet.Trials).Count -ne 3){throw 'A successful three-command observation packet is required.'}
@@ -20,12 +20,14 @@ function Compare-SentinelDurableObservation($Packet,$Records) {
 
 function Get-SentinelDurableObservation($Packet) {
     $path=Join-Path ([IO.Path]::GetFullPath([string]$Packet.Root)) 'logs\process-events.jsonl'
-    $mutex=Enter-SentinelLogLock $path
+    $budget=Enter-SentinelLogLock (Join-Path ([IO.Path]::GetFullPath([string]$Packet.Root)) 'logs\__capacity')
+    $mutex=$null
     try {
+        $mutex=Enter-SentinelLogLock $path
         $checkpoint=Get-SentinelChainPath $path
-        if(Test-Path -LiteralPath ($checkpoint+'.pending')){throw 'Process log transaction is pending; retry without repairing it.'}
+        foreach($suffix in @('.pending','.rotate.pending','.retire.pending')){if(Test-Path -LiteralPath ($checkpoint+$suffix)){throw 'Process log transaction is pending; retry without repairing it.'}}
         if(-not (Get-SentinelLogVerification $path).Valid){throw 'Process evidence log failed chain verification.'}
-        $records=@(Get-Content -LiteralPath $path -Encoding UTF8 -ErrorAction Stop | ForEach-Object {$_ | ConvertFrom-Json -ErrorAction Stop})
+        $records=@(Read-SentinelLogRows $path)
         return Compare-SentinelDurableObservation $Packet $records
-    } finally {$mutex.ReleaseMutex();$mutex.Dispose()}
+    } finally {if($mutex){$mutex.ReleaseMutex();$mutex.Dispose()};$budget.ReleaseMutex();$budget.Dispose()}
 }

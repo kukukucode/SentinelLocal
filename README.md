@@ -11,6 +11,8 @@ Microsoft Defenderを主防御エンジンとして利用する、軽量Host IDS
 
 **既知の制限:** 正常コマンド30試行でSysmon原本は30/30件、Sentinelへの120秒以内の保存は0/30件でした。取り込みの滞留とログ容量管理は[Issue #6〜#12](https://github.com/kukukucode/SentinelLocal/issues?q=is%3Aissue%20is%3Aopen)で追跡しています。実マルウェアの防御性能は未測定で、常用前の評価・改善が必要です。
 
+開発中のソースでは、Sysmon取得と評価のプロセス分離、滞留の独立判定、検証可能なログ分割・総容量制限に対応しています。公開済みpreview.1には含まれず、修正後の実PC測定は未完了です。[変更内容と保持方針](docs/INGESTION_STORAGE_JP.md)を参照してください。
+
 ## リポジトリ構成
 
 | フォルダー | 内容 |

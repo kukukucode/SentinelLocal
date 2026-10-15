@@ -1,4 +1,4 @@
-param([string]$ScratchRoot=(Join-Path $env:TEMP ('SentinelLocal-sysmon-integration-'+[guid]::NewGuid().ToString('N'))))
+﻿param([string]$ScratchRoot=(Join-Path $env:TEMP ('SentinelLocal-sysmon-integration-'+[guid]::NewGuid().ToString('N'))))
 $ErrorActionPreference='Stop'
 $repo=Split-Path -Parent $PSScriptRoot
 . (Join-Path $repo 'src\Common.ps1')
@@ -40,8 +40,10 @@ try {
     function Get-CimInstance {throw 'Integration must use durable creation data.'}
     $timer=[Diagnostics.Stopwatch]::StartNew();$matched=@()
     do {
-        Read-SentinelSysmon $root $config {param($p) [pscustomobject]@{Score=0;Reasons=@()}} {throw 'No real Defender/response actions are allowed in integration.'}
-        $records=@(Get-Content (Join-Path $root 'logs\process-events.jsonl') -ErrorAction SilentlyContinue | ForEach-Object {$_ | ConvertFrom-Json})
+        Receive-SentinelSysmonBatch $root $config
+        [void](Invoke-SentinelPendingSysmonAnalysis $root $config {param($p) [pscustomobject]@{Score=0;Reasons=@()}} {throw 'No real Defender/response actions are allowed in integration.'})
+        $processLog=Join-Path $root 'logs\process-events.jsonl'
+        $records=if(Test-Path -LiteralPath $processLog){@(Read-SentinelLogRows $processLog)}else{@()}
         $matched=@(foreach($trial in $trials){
             $candidates=@($records | Where-Object {$_.MetadataComplete -and $_.Process.ProcessId -eq $trial.ProcessId -and $_.Process.ExecutablePath -ieq $trial.Image -and $_.Process.ObservedSHA256 -ieq $trial.SHA256 -and [datetimeoffset]$_.Process.CreationDate -ge $trial.StartedAt.AddSeconds(-1) -and [datetimeoffset]$_.Process.CreationDate -le $trial.EndedAt.AddSeconds(1)})
             if($candidates.Count -eq 1){[pscustomobject]@{Command=$trial.Id;ProcessId=$trial.ProcessId;ProcessGuid=$candidates[0].Process.ProcessGuid;CommandLine=$candidates[0].Process.CommandLine;SHA256=$candidates[0].Process.ObservedSHA256}}

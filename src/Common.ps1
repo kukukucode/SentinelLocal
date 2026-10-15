@@ -7,6 +7,7 @@
 . (Join-Path $PSScriptRoot 'PolicyManagement.ps1')
 . (Join-Path $PSScriptRoot 'DetectionSafety.ps1')
 . (Join-Path $PSScriptRoot 'TaskIntegrity.ps1')
+. (Join-Path $PSScriptRoot 'SysmonMonitoring.ps1')
 
 function Get-SentinelStringHash {
     param([Parameter(Mandatory=$true)][string]$Text)
@@ -40,10 +41,8 @@ function Write-SentinelJsonLine {
     try {
         $payload=ConvertTo-SentinelOrderedMap $Data
         $payload['Timestamp']=(Get-Date).ToString('o')
-        if ($config -and $config.Resources -and (Test-Path -LiteralPath $Path)) {
-            if ((Get-Item -LiteralPath $Path).Length -ge ([long]$config.Resources.MaxLogFileMB*1MB)) { throw 'Log capacity reached; use verified audit export and retention.' }
-        }
-        Add-SentinelChainedRecord -Path $Path -Payload $payload
+        $limits=Get-SentinelLogLimits $config
+        Add-SentinelChainedRecord -Path $Path -Payload $payload -MaxFileBytes $limits.FileBytes -MaxTotalBytes $limits.TotalBytes
         if ([string]$payload['Severity'] -in @('HIGH','CRITICAL')) {
             try {
                 $type=if ($payload['Severity'] -eq 'CRITICAL') { 'Error' } else { 'Warning' }
@@ -54,6 +53,19 @@ function Write-SentinelJsonLine {
     } catch {
         try { Write-EventLog -LogName Application -Source SentinelLocal -EventId 1901 -EntryType Error -Message ('Logging failure: '+$Path+' '+$_.Exception.Message) -ErrorAction Stop }
         catch { [Diagnostics.Debug]::WriteLine($_.Exception.Message) }
+        return $false
+    }
+}
+
+function Write-SentinelJsonBatch {
+    param([string]$Path,[object[]]$Data)
+    try{
+        $payloads=@(foreach($row in $Data){$payload=ConvertTo-SentinelOrderedMap $row;$payload['Timestamp']=[datetimeoffset]::Now.ToString('o');$payload})
+        $limits=Get-SentinelLogLimits $config
+        Add-SentinelChainedRecords -Path $Path -Payloads $payloads -MaxFileBytes $limits.FileBytes -MaxTotalBytes $limits.TotalBytes
+        return $true
+    }catch{
+        try{Write-EventLog -LogName Application -Source SentinelLocal -EventId 1901 -EntryType Error -Message ('Batch logging failure: '+$Path+' '+$_.Exception.Message)}catch{[Diagnostics.Debug]::WriteLine($_.Exception.Message)}
         return $false
     }
 }
@@ -246,7 +258,9 @@ function Invoke-SentinelRetention {
 
         try {
             if ($ext -eq ".jsonl") {
-                Invoke-SentinelJsonRetention -Path $path.FullName -Cutoff $cutoff
+                if($path.Name -match '\.s\d{6}\.jsonl$'){continue}
+                if(Test-Path -LiteralPath ((Get-SentinelChainPath $path.FullName)+'.segments.json')){Invoke-SentinelSegmentRetention -Path $path.FullName -Cutoff $cutoff}
+                else{Invoke-SentinelJsonRetention -Path $path.FullName -Cutoff $cutoff}
             }
             elseif ($path.Name -eq "events.log") {
                 $writer = [System.IO.StreamWriter]::new($tmp, $false, [System.Text.UTF8Encoding]::new($true))
@@ -391,7 +405,7 @@ function Get-SentinelSourceRoot {
 
 function Get-SentinelSourcePath {
     param([string]$Root,[string]$Name)
-    if($Name -notin @(Get-SentinelPackageFiles) -and $Name -notin @('README.md','README_JP.txt','CHANGELOG.txt','docs/OPERATIONS_JP.md','docs/PILOT_JP.md','docs/REPOSITORY_JP.md','docs/SECURITY_JP.md','docs/EVALUATION_JP.md')) { throw 'Unknown SentinelLocal source file.' }
+    if($Name -notin @(Get-SentinelPackageFiles) -and $Name -notin @('README.md','README_JP.txt','CHANGELOG.txt','docs/OPERATIONS_JP.md','docs/PILOT_JP.md','docs/REPOSITORY_JP.md','docs/SECURITY_JP.md','docs/EVALUATION_JP.md','docs/INGESTION_STORAGE_JP.md')) { throw 'Unknown SentinelLocal source file.' }
     # Installed and distribution packages retain their flat file layout.
     $flat=Join-Path $Root $Name
     if(Test-Path -LiteralPath $flat -PathType Leaf) { return [IO.Path]::GetFullPath($flat) }

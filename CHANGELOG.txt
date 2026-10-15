@@ -1,3 +1,10 @@
+﻿Unreleased - ingestion and log reliability (Windows, 2026-10-16)
+- Separate fast Sysmon batch persistence from durable deferred scoring in an owned, restartable analysis process; retain observed hashes, ordered reset controls and retryable work across failures.
+- Report source and analysis backlog, oldest wait, bounded pending count and recent batch rates separately from component heartbeat; warn/recover and gate measurement on timely observation.
+- Rotate size-bounded JSONL into immutable hash-linked segments, verify checkpoints/indexes, recover interrupted rotation/retirement, and enforce a default 512 MiB aggregate JSONL quota.
+- Include all segments and index hashes in audit snapshots and evaluation readers. Readiness verifies copies after releasing production writer locks.
+- Add Windows PowerShell 5.1 failure/concurrency/helper-lifecycle regressions and exercise acquisition plus deferred evaluation in real Sysmon CI.
+- Preserve the original real-PC result (native 30/30, Sentinel within 120 seconds 0/30). Post-fix real-PC acceptance and malware efficacy remain unmeasured. This source change is not part of published preview.1.
 v1.2.1-preview.1 - Windows evaluation preview (2026-10-15)
 - Refresh public release guidance, provide the Windows flat package separately from its Bootstrap, and publish file checksums and source metadata. Runtime Version remains 1.2.1; this is a prerelease.
 - Preserve the original 30-trial result (native Sysmon 30/30, Sentinel persistence within 120 seconds 0/30); ingestion backlog and log rotation remain open in issues #6-#12. Malware efficacy remains unmeasured.
