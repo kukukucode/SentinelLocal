@@ -15,19 +15,57 @@
     }
     $batch=if($deferred){$RecordedBatch}else{Get-SentinelEventBatch -LogName 'Microsoft-Windows-Sysmon/Operational' -Cursor $cursor -CursorTime $time -Ids @(1,3,4,16,19,20,21,22,25,255) -BatchSize ([int]$Config.EventBatchSize)}
     if($batch.Reset) {
-        if(-not (Write-SentinelJsonLine (Join-Path $Root 'logs\alerts.jsonl') ([ordered]@{Type='EventLogCursorReset';Severity='HIGH';Log='Sysmon';PreviousCursor=$cursor}))) {throw 'Cannot persist Sysmon cursor reset.'}
+        if(-not $deferred -and -not (Write-SentinelJsonLine (Join-Path $Root 'logs\alerts.jsonl') ([ordered]@{Type='EventLogCursorReset';Severity='HIGH';Log='Sysmon';PreviousCursor=$cursor}))) {throw 'Cannot persist Sysmon cursor reset.'}
         $cache=@{};Write-SentinelAtomicJson $cachePath ([ordered]@{Processes=@()})
         Write-SentinelAtomicJson $cursorPath ([ordered]@{RecordId=0L;TimeCreated=''})
     }
     $processingStarted=Get-SentinelSysmonMonotonicSeconds
     foreach($event in @($batch.Events)) {
-        $data=Get-SentinelEventData $event
+        # Only malformed event XML / process timestamp is quarantined. Other
+        # failures (disk, queue, access, code) must retry without skipping.
+        $parseFailure=$null;$data=$null;$validatedProcess=$null
+        if($deferred){
+            try {
+                $data=Get-SentinelEventData $event
+                if($event.Id -eq 1){$validatedProcess=ConvertFrom-SentinelSysmonProcess $data}
+            }catch{
+                $cause=$_.Exception
+                if($cause -is [System.Xml.XmlException] -or $cause -is [System.Management.Automation.PSInvalidCastException] -or $cause -is [System.FormatException] -or
+                   $cause -is [System.OverflowException] -or $cause.InnerException -is [System.Xml.XmlException] -or
+                   $cause.InnerException -is [System.FormatException] -or $cause.InnerException -is [System.OverflowException]){
+                    $parseFailure=$cause.Message
+                }else{throw}
+            }
+        }else{$data=Get-SentinelEventData $event}
+        if($parseFailure){
+            $xml=[string]$event.ToXml()
+            $failureKey=Get-SentinelStringHash (([string]$event.RecordId)+'|'+([string]$event.Id)+'|'+$xml)
+            $failedDir=Join-Path $Root 'state\sysmon-analysis\failed'
+            Assert-SentinelSysmonDataPath $failedDir
+            $failedPath=Join-Path $failedDir ($failureKey+'.json')
+            if(-not (Test-Path -LiteralPath $failedPath)){
+                Write-SentinelAtomicJson $failedPath ([ordered]@{
+                    Schema=1;Status='Unevaluated';EventId=[int]$event.Id;RecordId=[long]$event.RecordId
+                    TimeCreated=$event.TimeCreated.ToString('o');Xml=$xml;FailureClass='InvalidEventData'
+                    Reason=$parseFailure;RecordedAt=[datetimeoffset]::Now.ToString('o')
+                })
+            }
+            if(-not (Write-SentinelJsonLine (Join-Path $Root 'logs\alerts.jsonl') ([ordered]@{
+                Type='SysmonAnalysisEventQuarantined';Severity='HIGH'
+                EventId=[int]$event.Id;RecordId=[long]$event.RecordId;FailureKey=$failureKey
+                Reason='Invalid persisted event XML or process metadata; original event preserved for review.'
+            }))){throw 'Cannot persist quarantined event alert.'}
+            Write-SentinelAtomicJson $cachePath ([ordered]@{Processes=@($cache.Values)})
+            Write-SentinelAtomicJson $cursorPath ([ordered]@{RecordId=[long]$event.RecordId;TimeCreated=$event.TimeCreated.ToString('o')})
+            if($AfterEvent){& $AfterEvent $event}
+            continue
+        }
         if(-not $deferred -and -not (Write-SentinelJsonLine (Join-Path $Root 'logs\sysmon-events.jsonl') ([ordered]@{Type='SysmonEvent';EventId=$event.Id;RecordId=$event.RecordId;EventTime=$event.TimeCreated.ToString('o');Data=$data}))) {throw 'Cannot persist Sysmon event.'}
         # Expire by event time and bound cardinality; never correlate by a reused PID.
         $cutoff=([datetime]$event.TimeCreated).AddHours(-1)
         foreach($key in @($cache.Keys)) {if([datetimeoffset]::Parse([string]$cache[$key].SeenAt).LocalDateTime -lt $cutoff){$cache.Remove($key)}}
         if($event.Id -eq 1) {
-            $process=ConvertFrom-SentinelSysmonProcess $data
+            $process=if($deferred){$validatedProcess}else{ConvertFrom-SentinelSysmonProcess $data}
             $complete=$process.ProcessId -gt 0 -and [IO.Path]::IsPathRooted($process.ExecutablePath) -and $process.CommandLine -and $process.ProcessGuid -and $process.ObservedSHA256
             if(-not $deferred -and -not (Write-SentinelJsonLine (Join-Path $Root 'logs\process-events.jsonl') ([ordered]@{Type='ProcessCreated';Source='Sysmon';RecordId=$event.RecordId;EventTime=$event.TimeCreated.ToString('o');MetadataComplete=[bool]$complete;Process=$process}))) {throw 'Cannot persist recorded process identity.'}
             $score=& $ScoreProcess $process
@@ -59,7 +97,7 @@
                 }
             }
         } elseif($event.Id -eq 255) {
-            if(-not (Write-SentinelJsonLine (Join-Path $Root 'logs\alerts.jsonl') ([ordered]@{Type='SysmonTelemetryError';Severity='HIGH';RecordId=$event.RecordId;EventTime=$event.TimeCreated.ToString('o');Data=$data;Reason='Provider reported a telemetry error; do not assume complete process observation.'}))) {throw 'Cannot persist Sysmon telemetry error.'}
+            if(-not $deferred -and -not (Write-SentinelJsonLine (Join-Path $Root 'logs\alerts.jsonl') ([ordered]@{Type='SysmonTelemetryError';Severity='HIGH';RecordId=$event.RecordId;EventTime=$event.TimeCreated.ToString('o');Data=$data;Reason='Provider reported a telemetry error; do not assume complete process observation.'}))) {throw 'Cannot persist Sysmon telemetry error.'}
         } elseif($event.Id -in @(19,20,21,25)) {
             $kind=if($event.Id -eq 25){'SysmonProcessTampering'}else{'SysmonWmiPersistence'}
             if(-not (Write-SentinelJsonLine (Join-Path $Root 'logs\alerts.jsonl') ([ordered]@{Type=$kind;Severity='HIGH';EventId=$event.Id;RecordId=$event.RecordId;Data=$data;Reason='Suspicious telemetry requires review; no heuristic process termination.'}))) {throw 'Cannot persist Sysmon detection.'}
@@ -154,6 +192,9 @@ function Get-SentinelSysmonBacklog {
         if(Test-Path -LiteralPath $cursorPath){$saved=Get-Content -LiteralPath $cursorPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop;$cursor=[long]$saved.RecordId;$time=[string]$saved.TimeCreated}
         $batch=Get-SentinelEventBatch -LogName 'Microsoft-Windows-Sysmon/Operational' -Cursor $cursor -CursorTime $time -Ids @(1,3,4,16,19,20,21,22,25,255) -BatchSize 1000
         $queue=Get-SentinelSysmonQueueState $Root
+        $failedDir=Join-Path $Root 'state\sysmon-analysis\failed'
+        Assert-SentinelSysmonDataPath $failedDir
+        $failedCount=if(Test-Path -LiteralPath $failedDir){@(Get-ChildItem -LiteralPath $failedDir -File -Filter '*.json' -ErrorAction Stop).Count}else{0}
         $source=@($batch.Events);$oldest=if($source.Count){[datetimeoffset]$source[0].TimeCreated}else{$null}
         $sourceAge=if($oldest){($at-$oldest).TotalSeconds}else{0.0}
         $analysisAge=if($queue.OldestEventAt){($at-$queue.OldestEventAt).TotalSeconds}else{0.0}
@@ -162,10 +203,10 @@ function Get-SentinelSysmonBacklog {
         $age=($at-[datetimeoffset]$beat.LastUpdated).TotalSeconds
         if($beat.Version -ne $Config.Version -or $beat.Status -ne 'Running' -or $age -lt -5 -or $age -gt 120 -or -not (Test-SentinelSysmonAnalysisIdentity $Root $beat $process)){throw 'Analysis heartbeat/process identity is unavailable, stale or incorrect.'}
         if($sourceAge -lt -5 -or $analysisAge -lt -5){throw 'Source/queue event time is unexpectedly in the future.'}
-        $status=if($batch.Reset){'Discontinuity'}elseif($sourceAge -gt 120 -or $analysisAge -gt 120){'Delayed'}else{'Healthy'}
-        [pscustomobject]@{CheckedAt=$at.ToString('o');Status=$status;CursorRecordId=$cursor;SourcePendingEvents=$source.Count;SourceCountIsLowerBound=($source.Count -eq 1000);SourceOldestEventAt=$(if($oldest){$oldest.ToString('o')}else{$null});SourceOldestWaitSeconds=$sourceAge;AnalysisPendingEvents=$queue.PendingEvents;AnalysisBytes=$queue.Bytes;AnalysisOldestEventAt=$(if($queue.OldestEventAt){$queue.OldestEventAt.ToString('o')}else{$null});AnalysisOldestWaitSeconds=$analysisAge;AnalysisProcessId=[int]$beat.ProcessId;IngestionEventsPerSecond=(Get-SentinelRecentBatchRate $Root 'ingestion');AnalysisEventsPerSecond=(Get-SentinelRecentBatchRate $Root 'analysis');Error=$null}
+        $status=if($batch.Reset){'Discontinuity'}elseif($sourceAge -gt 120 -or $analysisAge -gt 120){'Delayed'}elseif($failedCount -gt 0){'Degraded'}else{'Healthy'}
+        [pscustomobject]@{CheckedAt=$at.ToString('o');Status=$status;CursorRecordId=$cursor;SourcePendingEvents=$source.Count;SourceCountIsLowerBound=($source.Count -eq 1000);SourceOldestEventAt=$(if($oldest){$oldest.ToString('o')}else{$null});SourceOldestWaitSeconds=$sourceAge;AnalysisPendingEvents=$queue.PendingEvents;AnalysisBytes=$queue.Bytes;QuarantinedEvents=$failedCount;AnalysisOldestEventAt=$(if($queue.OldestEventAt){$queue.OldestEventAt.ToString('o')}else{$null});AnalysisOldestWaitSeconds=$analysisAge;AnalysisProcessId=[int]$beat.ProcessId;IngestionEventsPerSecond=(Get-SentinelRecentBatchRate $Root 'ingestion');AnalysisEventsPerSecond=(Get-SentinelRecentBatchRate $Root 'analysis');Error=$null}
     }catch{
-        [pscustomobject]@{CheckedAt=$at.ToString('o');Status='Unverified';CursorRecordId=$null;SourcePendingEvents=$null;SourceCountIsLowerBound=$null;SourceOldestEventAt=$null;SourceOldestWaitSeconds=$null;AnalysisPendingEvents=$null;AnalysisBytes=$null;AnalysisOldestEventAt=$null;AnalysisOldestWaitSeconds=$null;AnalysisProcessId=$null;Error=$_.Exception.Message}
+        [pscustomobject]@{CheckedAt=$at.ToString('o');Status='Unverified';CursorRecordId=$null;SourcePendingEvents=$null;SourceCountIsLowerBound=$null;SourceOldestEventAt=$null;SourceOldestWaitSeconds=$null;AnalysisPendingEvents=$null;AnalysisBytes=$null;QuarantinedEvents=$null;AnalysisOldestEventAt=$null;AnalysisOldestWaitSeconds=$null;AnalysisProcessId=$null;Error=$_.Exception.Message}
     }
 }
 
@@ -198,7 +239,14 @@ function Get-SentinelContentSignatureStatus {
         $entry=$script:SentinelSignatureCache[$key];$now=[datetimeoffset]::Now
         if($entry -and ($now-$entry.At).TotalSeconds -ge 0 -and ($now-$entry.At).TotalSeconds -le 15){return $entry.Status}
         $status=(Get-AuthenticodeSignature -FilePath $Path -ErrorAction Stop).Status
-        if($script:SentinelSignatureCache.Count -ge 256){$script:SentinelSignatureCache.Clear()}
+        if($script:SentinelSignatureCache.Count -ge 256){
+            $expired=@($script:SentinelSignatureCache.Keys | Where-Object {($now-$script:SentinelSignatureCache[$_].At).TotalSeconds -gt 15})
+            foreach($old in $expired){[void]$script:SentinelSignatureCache.Remove($old)}
+            if($script:SentinelSignatureCache.Count -ge 256){
+                $oldest=@($script:SentinelSignatureCache.GetEnumerator() | Sort-Object { $_.Value.At } | Select-Object -First 64)
+                foreach($old in $oldest){[void]$script:SentinelSignatureCache.Remove($old.Key)}
+            }
+        }
         $script:SentinelSignatureCache[$key]=[pscustomobject]@{At=$now;Status=$status}
         return $status
     }finally{$stream.Dispose()}
@@ -230,7 +278,9 @@ function Receive-SentinelSysmonBatch {
     $cursorPath=Join-Path $Root 'state\sysmon-cursor.json';$cursor=0L;$time=''
     if(Test-Path -LiteralPath $cursorPath){$saved=Get-Content -LiteralPath $cursorPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop;$cursor=[long]$saved.RecordId;$time=[string]$saved.TimeCreated}
     $limit=[math]::Min([int]$Config.EventBatchSize,[math]::Min(1000,[int]$Config.Resources.MaxQueueCount))
+    $fetchTimer=[Diagnostics.Stopwatch]::StartNew()
     $batch=Get-SentinelEventBatch -LogName 'Microsoft-Windows-Sysmon/Operational' -Cursor $cursor -CursorTime $time -Ids @(1,3,4,16,19,20,21,22,25,255) -BatchSize $limit
+    $fetchTimer.Stop()
     if($batch.Reset){
         if(-not (Write-SentinelJsonLine (Join-Path $Root 'logs\alerts.jsonl') ([ordered]@{Type='EventLogCursorReset';Severity='HIGH';Log='Sysmon';PreviousCursor=$cursor}))){throw 'Cannot persist source discontinuity.'}
     }
@@ -241,12 +291,28 @@ function Receive-SentinelSysmonBatch {
     Assert-SentinelStorage -Root $Root -Config $Config
     $raw=@();$identities=@();$recorded=@()
     foreach($event in $events){
-        $data=Get-SentinelEventData $event
-        $raw+=@([ordered]@{Type='SysmonEvent';EventId=$event.Id;RecordId=$event.RecordId;EventTime=$event.TimeCreated.ToString('o');Data=$data})
+        $xml=[string]$event.ToXml()
+        $data=@{};$dataError=$null
+        try{$data=Get-SentinelEventData $event}catch{
+            $cause=$_.Exception
+            if($cause -is [System.Xml.XmlException] -or $cause -is [System.Management.Automation.PSInvalidCastException] -or $cause.InnerException -is [System.Xml.XmlException]){
+                $dataError='InvalidEventXml'
+            }else{throw}
+        }
+        $raw+=@([ordered]@{Type='SysmonEvent';EventId=$event.Id;RecordId=$event.RecordId;EventTime=$event.TimeCreated.ToString('o');Data=$data;ParseStatus=$dataError})
         if($event.Id -eq 1){
-            $process=ConvertFrom-SentinelSysmonProcess $data
-            $complete=$process.ProcessId -gt 0 -and [IO.Path]::IsPathRooted($process.ExecutablePath) -and $process.CommandLine -and $process.ProcessGuid -and $process.ObservedSHA256
-            $identities+=@([ordered]@{Type='ProcessCreated';Source='Sysmon';RecordId=$event.RecordId;EventTime=$event.TimeCreated.ToString('o');MetadataComplete=[bool]$complete;Process=$process})
+            $process=$null
+            if(-not $dataError){
+                try{$process=ConvertFrom-SentinelSysmonProcess $data}catch{
+                    $cause=$_.Exception
+                    if($cause -is [System.FormatException] -or $cause -is [System.OverflowException] -or
+                       $cause.InnerException -is [System.FormatException] -or $cause.InnerException -is [System.OverflowException]){
+                        $dataError='InvalidProcessMetadata'
+                    }else{throw}
+                }
+            }
+            $complete=$null -ne $process -and $process.ProcessId -gt 0 -and [IO.Path]::IsPathRooted($process.ExecutablePath) -and $process.CommandLine -and $process.ProcessGuid -and $process.ObservedSHA256
+            $identities+=@([ordered]@{Type='ProcessCreated';Source='Sysmon';RecordId=$event.RecordId;EventTime=$event.TimeCreated.ToString('o');MetadataComplete=[bool]$complete;Process=$process;ParseStatus=$dataError})
         }
         if($event.Id -eq 255){if(-not (Write-SentinelJsonLine (Join-Path $Root 'logs\alerts.jsonl') ([ordered]@{Type='SysmonTelemetryError';Severity='HIGH';RecordId=$event.RecordId;EventTime=$event.TimeCreated.ToString('o');Data=$data}))){throw 'Cannot persist provider error.'}}
         $recorded+=@([ordered]@{Id=$event.Id;RecordId=[long]$event.RecordId;TimeCreated=$event.TimeCreated.ToString('o');Xml=$event.ToXml()})
@@ -254,8 +320,11 @@ function Receive-SentinelSysmonBatch {
     $unit=[ordered]@{Schema=1;Reset=[bool]$batch.Reset;QueuedAt=[datetimeoffset]::Now.ToString('o');NextIndex=0;Events=$recorded}
     $unitBytes=3+[Text.Encoding]::UTF8.GetByteCount(($unit | ConvertTo-Json -Depth 20 -Compress))
     if($queue.Bytes+$unitBytes -gt [math]::Min(64MB,[long]$Config.Resources.MaxLogFileMB*1MB)){throw 'Sysmon analysis byte capacity reached; source cursor retained.'}
+    $evidenceTimer=[Diagnostics.Stopwatch]::StartNew()
     if($raw.Count -and -not (Write-SentinelJsonBatch (Join-Path $Root 'logs\sysmon-events.jsonl') $raw)){throw 'Cannot persist source batch.'}
     if($identities.Count -and -not (Write-SentinelJsonBatch (Join-Path $Root 'logs\process-events.jsonl') $identities)){throw 'Cannot persist process batch.'}
+    $evidenceTimer.Stop()
+    $publishTimer=[Diagnostics.Stopwatch]::StartNew()
     # Publish work only after evidence is durable, and acknowledge the source
     # only after evaluation work is durable. Replays are deliberately at-least-once.
     $identity=if($events.Count){$events[0].RecordId.ToString()+'|'+$events[0].TimeCreated.ToString('o')+'|'+$events[-1].RecordId}else{'reset|'+$cursor+'|'+$time}
@@ -277,7 +346,8 @@ function Receive-SentinelSysmonBatch {
     }finally{$mutex.ReleaseMutex();$mutex.Dispose()}
     $lastId=if($events.Count){[long]$events[-1].RecordId}else{0L};$lastTime=if($events.Count){$events[-1].TimeCreated.ToString('o')}else{''}
     Write-SentinelAtomicJson $cursorPath ([ordered]@{RecordId=$lastId;TimeCreated=$lastTime})
-    Write-SentinelAtomicJson (Join-Path $Root 'state\sysmon-ingestion-metrics.json') ([ordered]@{LastUpdated=[datetimeoffset]::Now.ToString('o');Events=$events.Count;Seconds=$timer.Elapsed.TotalSeconds;AnalysisPendingAtLeast=($queue.PendingEvents+$events.Count);SourceRecordId=$lastId})
+    $publishTimer.Stop()
+    Write-SentinelAtomicJson (Join-Path $Root 'state\sysmon-ingestion-metrics.json') ([ordered]@{LastUpdated=[datetimeoffset]::Now.ToString('o');Events=$events.Count;Seconds=$timer.Elapsed.TotalSeconds;EventQuerySeconds=$fetchTimer.Elapsed.TotalSeconds;EvidenceWriteSeconds=$evidenceTimer.Elapsed.TotalSeconds;QueuePublishSeconds=$publishTimer.Elapsed.TotalSeconds;AnalysisPendingAtLeast=($queue.PendingEvents+$events.Count);SourceRecordId=$lastId})
 }
 
 function Invoke-SentinelPendingSysmonAnalysis {

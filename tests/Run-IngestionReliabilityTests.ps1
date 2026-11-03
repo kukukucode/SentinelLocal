@@ -27,6 +27,54 @@ Test 'Thirty process identities are durable before any signature scoring or resp
     Assert (Get-SentinelLogVerification (Join-Path $root 'logs\process-events.jsonl')).Valid 'Batch chain invalid.'
     Write-Host ('Synthetic acquisition seconds: '+$timer.Elapsed.TotalSeconds+'; not a real-PC performance result.')
 }
+Test 'Malformed event metadata is quarantined and does not block later valid analysis' {
+    $root=Fixture 'malformed-metadata'
+    $bad=Event 201;$bad.Xml=$bad.Xml.Replace('UtcTime', 'CorruptedTimeField')
+    $good=Event 202
+    $script:Batch=[pscustomobject]@{Reset=$false;Events=@($bad,$good)}
+    Receive-SentinelSysmonBatch $root $config
+    Assert ((Get-SentinelSysmonQueueState $root).PendingEvents -eq 2) 'Malformed event was not durably queued.'
+    $script:ScoredIds=[Collections.Generic.List[int]]::new()
+    $score={param($process) $script:ScoredIds.Add([int]$process.ProcessId);[pscustomobject]@{Score=0;Reasons=@()}}
+    [void](Invoke-SentinelPendingSysmonAnalysis $root $config $score {})
+    $quarantined=@(Get-ChildItem -LiteralPath (Join-Path $root 'state\sysmon-analysis\failed') -Filter '*.json' -File)
+    Assert ($quarantined.Count -eq 1) 'Invalid event was not isolated exactly once.'
+    $failure=Get-Content -LiteralPath $quarantined[0].FullName -Raw | ConvertFrom-Json
+    Assert ($failure.Status -eq 'Unevaluated' -and $failure.RecordId -eq 201 -and $failure.Xml -eq $bad.Xml) 'Original invalid event or review status was lost.'
+    Assert ($script:ScoredIds.Count -eq 1 -and $script:ScoredIds[0] -eq 1202) 'Valid event behind invalid event was blocked.'
+    Assert ((Get-SentinelSysmonQueueState $root).PendingEvents -eq 0) 'Durable evaluation queue failed to drain.'
+    Assert ((Get-Content (Join-Path $root 'state\sysmon-analysis-cursor.json') -Raw | ConvertFrom-Json).RecordId -eq 202) 'Analysis cursor failed to advance after quarantine.'
+    Assert (@(Read-SentinelLogRows (Join-Path $root 'logs\alerts.jsonl') | Where-Object Type -eq 'SysmonAnalysisEventQuarantined').Count -eq 1) 'Quarantine alert missing or duplicated.'
+}
+Test 'Malformed Sysmon XML is preserved and isolated without dropping following events' {
+    $root=Fixture 'malformed-xml'
+    $bad=Event 301;$bad.Xml='<Event><EventData><Data>'
+    $good=Event 302
+    $script:Batch=[pscustomobject]@{Reset=$false;Events=@($bad,$good)}
+    Receive-SentinelSysmonBatch $root $config
+    $script:ScoredIds=[Collections.Generic.List[int]]::new()
+    $score={param($process) $script:ScoredIds.Add([int]$process.ProcessId);[pscustomobject]@{Score=0;Reasons=@()}}
+    [void](Invoke-SentinelPendingSysmonAnalysis $root $config $score {})
+    $quarantined=@(Get-ChildItem -LiteralPath (Join-Path $root 'state\sysmon-analysis\failed') -Filter '*.json' -File)
+    Assert ($quarantined.Count -eq 1 -and $script:ScoredIds.Count -eq 1 -and $script:ScoredIds[0] -eq 1302) 'Invalid XML blocked subsequent work.'
+    Assert ((Get-SentinelSysmonQueueState $root).PendingEvents -eq 0) 'Quarantine did not drain the queue.'
+}
+Test 'Telemetry errors emit one alert on capture rather than another on deferred evaluation' {
+    $root=Fixture 'telemetry-once'
+    $errorEvent=Event 401;$errorEvent.Id=255
+    $script:Batch=[pscustomobject]@{Reset=$false;Events=@($errorEvent)}
+    Receive-SentinelSysmonBatch $root $config
+    [void](Invoke-SentinelPendingSysmonAnalysis $root $config {throw 'Telemetry-only events must not score a process'} {})
+    $alerts=@(Read-SentinelLogRows (Join-Path $root 'logs\alerts.jsonl') | Where-Object Type -eq 'SysmonTelemetryError')
+    Assert ($alerts.Count -eq 1) 'Telemetry warning was duplicated by deferred analysis.'
+}
+Test 'Ingestion phase timing fields describe completed durable batches' {
+    $root=Fixture 'ingestion-timing'
+    $script:Batch=[pscustomobject]@{Reset=$false;Events=@((Event 501))}
+    Receive-SentinelSysmonBatch $root $config
+    $metrics=Get-Content (Join-Path $root 'state\sysmon-ingestion-metrics.json') -Raw | ConvertFrom-Json
+    Assert ($metrics.Events -eq 1 -and $metrics.EventQuerySeconds -ge 0 -and $metrics.EvidenceWriteSeconds -ge 0 -and $metrics.QueuePublishSeconds -ge 0) 'Durable phase metrics missing.'
+}
 Test 'Deferred analysis survives a response failure without deleting pending work or original content identity' {
     $root=Fixture 'analysis';$script:Batch=[pscustomobject]@{Reset=$false;Events=@((Event 1))};Receive-SentinelSysmonBatch $root $config
     Refused {Invoke-SentinelPendingSysmonAnalysis $root $config {param($p) [pscustomobject]@{Score=80;Reasons=@('fixture')}} {throw 'Response queue unavailable'}}
@@ -157,6 +205,25 @@ Test 'Guardian warns on backlog and records recovery without suppressing failed 
     function Write-SentinelJsonLine{return $false}
     $script:GuardianBacklog.Status='Unverified';Check-SysmonBacklog
     Assert (-not $lastAlerts.ContainsKey('SysmonBacklog')) 'Failed alert write suppressed future retry.'
+}
+Test 'Storage pressure produces a bounded alert and a recovery record' {
+    $root=Fixture 'storage-alert';$alertLog=Join-Path $root 'logs\alerts.jsonl'
+    $lastAlertStatePath=Join-Path $root 'state\integrity-last-alerts.json';$lastAlerts=@{}
+    $tokens=$null;$parseErrors=$null
+    $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $repo 'src\IntegrityMonitor.ps1'),[ref]$tokens,[ref]$parseErrors)
+    foreach($name in @('Alert-Once','Save-LastAlerts','Clear-AlertKey','Check-SentinelStoragePressure')){
+        $item=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true)
+        Assert ($null -ne $item) ('Storage monitor function absent: '+$name)
+        . ([scriptblock]::Create($item.Extent.Text))
+    }
+    $script:MockStorage=[pscustomobject]@{LogBytes=90MB;MaxTotalLogBytes=100MB;EvidenceBytes=0L;FreeBytes=10GB;OversizeLogs=@()}
+    function Get-SentinelStorageStatus {return $script:MockStorage}
+    Check-SentinelStoragePressure;Check-SentinelStoragePressure
+    Assert (@(Read-SentinelLogRows $alertLog).Count -eq 1) 'Storage pressure alert was not deduplicated.'
+    $script:MockStorage.LogBytes=10MB
+    Check-SentinelStoragePressure
+    $rows=@(Read-SentinelLogRows $alertLog)
+    Assert ($rows.Count -eq 2 -and $rows[1].Type -eq 'SentinelStorageRecovered' -and -not $lastAlerts.ContainsKey('StoragePressure')) 'Capacity recovery not recorded.'
 }
 $results.ToArray() | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $ScratchRoot 'test-results.json') -Encoding UTF8
 $failed=@($results | Where-Object {-not $_.Passed}).Count
