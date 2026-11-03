@@ -59,6 +59,22 @@ Test 'Malformed Sysmon XML is preserved and isolated without dropping following 
     Assert ($quarantined.Count -eq 1 -and $script:ScoredIds.Count -eq 1 -and $script:ScoredIds[0] -eq 1302) 'Invalid XML blocked subsequent work.'
     Assert ((Get-SentinelSysmonQueueState $root).PendingEvents -eq 0) 'Quarantine did not drain the queue.'
 }
+Test 'Telemetry errors emit one alert on capture rather than another on deferred evaluation' {
+    $root=Fixture 'telemetry-once'
+    $errorEvent=Event 401;$errorEvent.Id=255
+    $script:Batch=[pscustomobject]@{Reset=$false;Events=@($errorEvent)}
+    Receive-SentinelSysmonBatch $root $config
+    [void](Invoke-SentinelPendingSysmonAnalysis $root $config {throw 'Telemetry-only events must not score a process'} {})
+    $alerts=@(Read-SentinelLogRows (Join-Path $root 'logs\alerts.jsonl') | Where-Object Type -eq 'SysmonTelemetryError')
+    Assert ($alerts.Count -eq 1) 'Telemetry warning was duplicated by deferred analysis.'
+}
+Test 'Ingestion phase timing fields describe completed durable batches' {
+    $root=Fixture 'ingestion-timing'
+    $script:Batch=[pscustomobject]@{Reset=$false;Events=@((Event 501))}
+    Receive-SentinelSysmonBatch $root $config
+    $metrics=Get-Content (Join-Path $root 'state\sysmon-ingestion-metrics.json') -Raw | ConvertFrom-Json
+    Assert ($metrics.Events -eq 1 -and $metrics.EventQuerySeconds -ge 0 -and $metrics.EvidenceWriteSeconds -ge 0 -and $metrics.QueuePublishSeconds -ge 0) 'Durable phase metrics missing.'
+}
 Test 'Deferred analysis survives a response failure without deleting pending work or original content identity' {
     $root=Fixture 'analysis';$script:Batch=[pscustomobject]@{Reset=$false;Events=@((Event 1))};Receive-SentinelSysmonBatch $root $config
     Refused {Invoke-SentinelPendingSysmonAnalysis $root $config {param($p) [pscustomobject]@{Score=80;Reasons=@('fixture')}} {throw 'Response queue unavailable'}}
