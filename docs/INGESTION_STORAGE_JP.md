@@ -48,6 +48,12 @@ Watcherは`Watcher.ps1 -AnalysisOnly`を別プロセスとして起動します�
 
 IntegrityMonitorは異常をHIGHで記録し、同じ状態の通知を5分単位で抑えます。正常に戻ったら`SysmonBacklogRecovered`を記録します。警告の保存に失敗した場合は通知済みとして抑制しません。Heartbeatが正常でも`Delayed`等なら計測前の診断は合格しません。診断合格は検知性能の合格ではありません。
 
+## 容量接近の警告（追加）
+
+IntegrityMonitor は60秒間隔で `Get-SentinelStorageStatus` を確認します。ログ総量と証拠保存量の80%以上、空き容量が最低要件の2倍未満、ログファイルの個別上限超過、ディスク空き容量の取得不能のいずれかで `SentinelStoragePressure` (HIGH) を記録します。同じ条件での重複警告は既存の5分単位の抑制を使用し、すべて解消した場合は `SentinelStorageRecovered` を記録します。状態の収集が失敗した場合は `SentinelStorageUnverified` を記録します。
+
+この通知は容量接近に対する早期警告であり、容量上限による書き込み拒否を解除するものではありません。証拠の自動削除は行わず、検証済みの保全と明示的な運用対応を必要とします。計測用Tempコピーは依然として上限対象外です。
+
 ## 分割保存と保持
 
 JSONLは既定で1ファイル64MiBになる前に、`<stream>.s000001.jsonl`のような変更しないセグメントへ移します。新しいアクティブログは前セグメントの末尾ハッシュを引き継ぎます。`state/log-chain/*.segments.json`に連番・サイズ・件数・SHA256・チェーンの両端・閉鎖時刻を保存します。
