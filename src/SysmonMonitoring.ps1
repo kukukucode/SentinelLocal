@@ -289,12 +289,28 @@ function Receive-SentinelSysmonBatch {
     Assert-SentinelStorage -Root $Root -Config $Config
     $raw=@();$identities=@();$recorded=@()
     foreach($event in $events){
-        $data=Get-SentinelEventData $event
-        $raw+=@([ordered]@{Type='SysmonEvent';EventId=$event.Id;RecordId=$event.RecordId;EventTime=$event.TimeCreated.ToString('o');Data=$data})
+        $xml=[string]$event.ToXml()
+        $data=@{};$dataError=$null
+        try{$data=Get-SentinelEventData $event}catch{
+            $cause=$_.Exception
+            if($cause -is [System.Xml.XmlException] -or $cause.InnerException -is [System.Xml.XmlException]){
+                $dataError='InvalidEventXml'
+            }else{throw}
+        }
+        $raw+=@([ordered]@{Type='SysmonEvent';EventId=$event.Id;RecordId=$event.RecordId;EventTime=$event.TimeCreated.ToString('o');Data=$data;ParseStatus=$dataError})
         if($event.Id -eq 1){
-            $process=ConvertFrom-SentinelSysmonProcess $data
-            $complete=$process.ProcessId -gt 0 -and [IO.Path]::IsPathRooted($process.ExecutablePath) -and $process.CommandLine -and $process.ProcessGuid -and $process.ObservedSHA256
-            $identities+=@([ordered]@{Type='ProcessCreated';Source='Sysmon';RecordId=$event.RecordId;EventTime=$event.TimeCreated.ToString('o');MetadataComplete=[bool]$complete;Process=$process})
+            $process=$null
+            if(-not $dataError){
+                try{$process=ConvertFrom-SentinelSysmonProcess $data}catch{
+                    $cause=$_.Exception
+                    if($cause -is [System.FormatException] -or $cause -is [System.OverflowException] -or
+                       $cause.InnerException -is [System.FormatException] -or $cause.InnerException -is [System.OverflowException]){
+                        $dataError='InvalidProcessMetadata'
+                    }else{throw}
+                }
+            }
+            $complete=$null -ne $process -and $process.ProcessId -gt 0 -and [IO.Path]::IsPathRooted($process.ExecutablePath) -and $process.CommandLine -and $process.ProcessGuid -and $process.ObservedSHA256
+            $identities+=@([ordered]@{Type='ProcessCreated';Source='Sysmon';RecordId=$event.RecordId;EventTime=$event.TimeCreated.ToString('o');MetadataComplete=[bool]$complete;Process=$process;ParseStatus=$dataError})
         }
         if($event.Id -eq 255){if(-not (Write-SentinelJsonLine (Join-Path $Root 'logs\alerts.jsonl') ([ordered]@{Type='SysmonTelemetryError';Severity='HIGH';RecordId=$event.RecordId;EventTime=$event.TimeCreated.ToString('o');Data=$data}))){throw 'Cannot persist provider error.'}}
         $recorded+=@([ordered]@{Id=$event.Id;RecordId=[long]$event.RecordId;TimeCreated=$event.TimeCreated.ToString('o');Xml=$event.ToXml()})
