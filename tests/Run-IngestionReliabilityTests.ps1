@@ -27,6 +27,38 @@ Test 'Thirty process identities are durable before any signature scoring or resp
     Assert (Get-SentinelLogVerification (Join-Path $root 'logs\process-events.jsonl')).Valid 'Batch chain invalid.'
     Write-Host ('Synthetic acquisition seconds: '+$timer.Elapsed.TotalSeconds+'; not a real-PC performance result.')
 }
+Test 'Malformed event metadata is quarantined and does not block later valid analysis' {
+    $root=Fixture 'malformed-metadata'
+    $bad=Event 201;$bad.Xml=$bad.Xml.Replace('UtcTime', 'CorruptedTimeField')
+    $good=Event 202
+    $script:Batch=[pscustomobject]@{Reset=$false;Events=@($bad,$good)}
+    Receive-SentinelSysmonBatch $root $config
+    Assert ((Get-SentinelSysmonQueueState $root).PendingEvents -eq 2) 'Malformed event was not durably queued.'
+    $script:ScoredIds=[Collections.Generic.List[int]]::new()
+    $score={param($process) $script:ScoredIds.Add([int]$process.ProcessId);[pscustomobject]@{Score=0;Reasons=@()}}
+    [void](Invoke-SentinelPendingSysmonAnalysis $root $config $score {})
+    $quarantined=@(Get-ChildItem -LiteralPath (Join-Path $root 'state\sysmon-analysis\failed') -Filter '*.json' -File)
+    Assert ($quarantined.Count -eq 1) 'Invalid event was not isolated exactly once.'
+    $failure=Get-Content -LiteralPath $quarantined[0].FullName -Raw | ConvertFrom-Json
+    Assert ($failure.Status -eq 'Unevaluated' -and $failure.RecordId -eq 201 -and $failure.Xml -eq $bad.Xml) 'Original invalid event or review status was lost.'
+    Assert ($script:ScoredIds.Count -eq 1 -and $script:ScoredIds[0] -eq 1202) 'Valid event behind invalid event was blocked.'
+    Assert ((Get-SentinelSysmonQueueState $root).PendingEvents -eq 0) 'Durable evaluation queue failed to drain.'
+    Assert ((Get-Content (Join-Path $root 'state\sysmon-analysis-cursor.json') -Raw | ConvertFrom-Json).RecordId -eq 202) 'Analysis cursor failed to advance after quarantine.'
+    Assert (@(Read-SentinelLogRows (Join-Path $root 'logs\alerts.jsonl') | Where-Object Type -eq 'SysmonAnalysisEventQuarantined').Count -eq 1) 'Quarantine alert missing or duplicated.'
+}
+Test 'Malformed Sysmon XML is preserved and isolated without dropping following events' {
+    $root=Fixture 'malformed-xml'
+    $bad=Event 301;$bad.Xml='<Event><EventData><Data>'
+    $good=Event 302
+    $script:Batch=[pscustomobject]@{Reset=$false;Events=@($bad,$good)}
+    Receive-SentinelSysmonBatch $root $config
+    $script:ScoredIds=[Collections.Generic.List[int]]::new()
+    $score={param($process) $script:ScoredIds.Add([int]$process.ProcessId);[pscustomobject]@{Score=0;Reasons=@()}}
+    [void](Invoke-SentinelPendingSysmonAnalysis $root $config $score {})
+    $quarantined=@(Get-ChildItem -LiteralPath (Join-Path $root 'state\sysmon-analysis\failed') -Filter '*.json' -File)
+    Assert ($quarantined.Count -eq 1 -and $script:ScoredIds.Count -eq 1 -and $script:ScoredIds[0] -eq 1302) 'Invalid XML blocked subsequent work.'
+    Assert ((Get-SentinelSysmonQueueState $root).PendingEvents -eq 0) 'Quarantine did not drain the queue.'
+}
 Test 'Deferred analysis survives a response failure without deleting pending work or original content identity' {
     $root=Fixture 'analysis';$script:Batch=[pscustomobject]@{Reset=$false;Events=@((Event 1))};Receive-SentinelSysmonBatch $root $config
     Refused {Invoke-SentinelPendingSysmonAnalysis $root $config {param($p) [pscustomobject]@{Score=80;Reasons=@('fixture')}} {throw 'Response queue unavailable'}}
