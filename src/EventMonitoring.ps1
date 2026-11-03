@@ -1,6 +1,7 @@
 ﻿function Get-SentinelEventData {
     param($Event)
-    [xml]$xml = $Event.ToXml()
+    $xml=[System.Xml.XmlDocument]::new()
+    $xml.LoadXml([string]$Event.ToXml())
     $data = @{}
     foreach ($node in $xml.SelectNodes("//*[local-name()='EventData']/*[local-name()='Data']")) {
         $data[[string]$node.GetAttribute('Name')] = [string]$node.InnerText
