@@ -278,7 +278,9 @@ function Receive-SentinelSysmonBatch {
     $cursorPath=Join-Path $Root 'state\sysmon-cursor.json';$cursor=0L;$time=''
     if(Test-Path -LiteralPath $cursorPath){$saved=Get-Content -LiteralPath $cursorPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop;$cursor=[long]$saved.RecordId;$time=[string]$saved.TimeCreated}
     $limit=[math]::Min([int]$Config.EventBatchSize,[math]::Min(1000,[int]$Config.Resources.MaxQueueCount))
+    $fetchTimer=[Diagnostics.Stopwatch]::StartNew()
     $batch=Get-SentinelEventBatch -LogName 'Microsoft-Windows-Sysmon/Operational' -Cursor $cursor -CursorTime $time -Ids @(1,3,4,16,19,20,21,22,25,255) -BatchSize $limit
+    $fetchTimer.Stop()
     if($batch.Reset){
         if(-not (Write-SentinelJsonLine (Join-Path $Root 'logs\alerts.jsonl') ([ordered]@{Type='EventLogCursorReset';Severity='HIGH';Log='Sysmon';PreviousCursor=$cursor}))){throw 'Cannot persist source discontinuity.'}
     }
@@ -318,8 +320,11 @@ function Receive-SentinelSysmonBatch {
     $unit=[ordered]@{Schema=1;Reset=[bool]$batch.Reset;QueuedAt=[datetimeoffset]::Now.ToString('o');NextIndex=0;Events=$recorded}
     $unitBytes=3+[Text.Encoding]::UTF8.GetByteCount(($unit | ConvertTo-Json -Depth 20 -Compress))
     if($queue.Bytes+$unitBytes -gt [math]::Min(64MB,[long]$Config.Resources.MaxLogFileMB*1MB)){throw 'Sysmon analysis byte capacity reached; source cursor retained.'}
+    $evidenceTimer=[Diagnostics.Stopwatch]::StartNew()
     if($raw.Count -and -not (Write-SentinelJsonBatch (Join-Path $Root 'logs\sysmon-events.jsonl') $raw)){throw 'Cannot persist source batch.'}
     if($identities.Count -and -not (Write-SentinelJsonBatch (Join-Path $Root 'logs\process-events.jsonl') $identities)){throw 'Cannot persist process batch.'}
+    $evidenceTimer.Stop()
+    $publishTimer=[Diagnostics.Stopwatch]::StartNew()
     # Publish work only after evidence is durable, and acknowledge the source
     # only after evaluation work is durable. Replays are deliberately at-least-once.
     $identity=if($events.Count){$events[0].RecordId.ToString()+'|'+$events[0].TimeCreated.ToString('o')+'|'+$events[-1].RecordId}else{'reset|'+$cursor+'|'+$time}
@@ -341,7 +346,8 @@ function Receive-SentinelSysmonBatch {
     }finally{$mutex.ReleaseMutex();$mutex.Dispose()}
     $lastId=if($events.Count){[long]$events[-1].RecordId}else{0L};$lastTime=if($events.Count){$events[-1].TimeCreated.ToString('o')}else{''}
     Write-SentinelAtomicJson $cursorPath ([ordered]@{RecordId=$lastId;TimeCreated=$lastTime})
-    Write-SentinelAtomicJson (Join-Path $Root 'state\sysmon-ingestion-metrics.json') ([ordered]@{LastUpdated=[datetimeoffset]::Now.ToString('o');Events=$events.Count;Seconds=$timer.Elapsed.TotalSeconds;AnalysisPendingAtLeast=($queue.PendingEvents+$events.Count);SourceRecordId=$lastId})
+    $publishTimer.Stop()
+    Write-SentinelAtomicJson (Join-Path $Root 'state\sysmon-ingestion-metrics.json') ([ordered]@{LastUpdated=[datetimeoffset]::Now.ToString('o');Events=$events.Count;Seconds=$timer.Elapsed.TotalSeconds;EventQuerySeconds=$fetchTimer.Elapsed.TotalSeconds;EvidenceWriteSeconds=$evidenceTimer.Elapsed.TotalSeconds;QueuePublishSeconds=$publishTimer.Elapsed.TotalSeconds;AnalysisPendingAtLeast=($queue.PendingEvents+$events.Count);SourceRecordId=$lastId})
 }
 
 function Invoke-SentinelPendingSysmonAnalysis {
