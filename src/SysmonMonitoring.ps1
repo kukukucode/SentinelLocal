@@ -30,7 +30,7 @@
                 if($event.Id -eq 1){$validatedProcess=ConvertFrom-SentinelSysmonProcess $data}
             }catch{
                 $cause=$_.Exception
-                if($cause -is [System.Xml.XmlException] -or $cause -is [System.FormatException] -or
+                if($cause -is [System.Xml.XmlException] -or $cause -is [System.Management.Automation.PSInvalidCastException] -or $cause -is [System.FormatException] -or
                    $cause -is [System.OverflowException] -or $cause.InnerException -is [System.Xml.XmlException] -or
                    $cause.InnerException -is [System.FormatException] -or $cause.InnerException -is [System.OverflowException]){
                     $parseFailure=$cause.Message
@@ -295,7 +295,7 @@ function Receive-SentinelSysmonBatch {
         $data=@{};$dataError=$null
         try{$data=Get-SentinelEventData $event}catch{
             $cause=$_.Exception
-            if($cause -is [System.Xml.XmlException] -or $cause.InnerException -is [System.Xml.XmlException]){
+            if($cause -is [System.Xml.XmlException] -or $cause -is [System.Management.Automation.PSInvalidCastException] -or $cause.InnerException -is [System.Xml.XmlException]){
                 $dataError='InvalidEventXml'
             }else{throw}
         }
