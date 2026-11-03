@@ -206,6 +206,25 @@ Test 'Guardian warns on backlog and records recovery without suppressing failed 
     $script:GuardianBacklog.Status='Unverified';Check-SysmonBacklog
     Assert (-not $lastAlerts.ContainsKey('SysmonBacklog')) 'Failed alert write suppressed future retry.'
 }
+Test 'Storage pressure produces a bounded alert and a recovery record' {
+    $root=Fixture 'storage-alert';$alertLog=Join-Path $root 'logs\alerts.jsonl'
+    $lastAlertStatePath=Join-Path $root 'state\integrity-last-alerts.json';$lastAlerts=@{}
+    $tokens=$null;$parseErrors=$null
+    $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $repo 'src\IntegrityMonitor.ps1'),[ref]$tokens,[ref]$parseErrors)
+    foreach($name in @('Alert-Once','Save-LastAlerts','Clear-AlertKey','Check-SentinelStoragePressure')){
+        $item=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true)
+        Assert ($null -ne $item) ('Storage monitor function absent: '+$name)
+        . ([scriptblock]::Create($item.Extent.Text))
+    }
+    $script:MockStorage=[pscustomobject]@{LogBytes=90MB;MaxTotalLogBytes=100MB;EvidenceBytes=0L;FreeBytes=10GB;OversizeLogs=@()}
+    function Get-SentinelStorageStatus {return $script:MockStorage}
+    Check-SentinelStoragePressure;Check-SentinelStoragePressure
+    Assert (@(Read-SentinelLogRows $alertLog).Count -eq 1) 'Storage pressure alert was not deduplicated.'
+    $script:MockStorage.LogBytes=10MB
+    Check-SentinelStoragePressure
+    $rows=@(Read-SentinelLogRows $alertLog)
+    Assert ($rows.Count -eq 2 -and $rows[1].Type -eq 'SentinelStorageRecovered' -and -not $lastAlerts.ContainsKey('StoragePressure')) 'Capacity recovery not recorded.'
+}
 $results.ToArray() | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $ScratchRoot 'test-results.json') -Encoding UTF8
 $failed=@($results | Where-Object {-not $_.Passed}).Count
 Write-Host ('Ingestion reliability tests: '+($results.Count-$failed)+'/'+$results.Count+' passed.')
