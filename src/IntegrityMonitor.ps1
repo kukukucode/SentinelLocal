@@ -191,6 +191,37 @@ function Check-FileIntegrity {
     }
 }
 
+function Check-SentinelStoragePressure {
+    # This is sampled once per minute so monitoring itself does not traverse
+    # evidence directories on every 15-second integrity-monitor cycle.
+    $key='StoragePressure'
+    try {
+        $storage=Get-SentinelStorageStatus $Root $config
+        $reasons=[Collections.Generic.List[string]]::new()
+        $capacity=[long]$storage.MaxTotalLogBytes
+        if($capacity -gt 0 -and [long]$storage.LogBytes*5 -ge $capacity*4){$reasons.Add('LogTotalAtLeast80Percent')}
+        $evidenceLimit=[long]$config.Resources.MaxEvidenceMB*1MB
+        if($evidenceLimit -gt 0 -and [long]$storage.EvidenceBytes*5 -ge $evidenceLimit*4){$reasons.Add('EvidenceAtLeast80Percent')}
+        $diskMinimum=[long]$config.Resources.MinFreeDiskMB*1MB
+        if($null -eq $storage.FreeBytes){$reasons.Add('DiskFreeUnverified')}
+        elseif([long]$storage.FreeBytes -lt ($diskMinimum*2)){$reasons.Add('DiskFreeNearMinimum')}
+        if(@($storage.OversizeLogs).Count -gt 0){$reasons.Add('OversizeLog')}
+        if($reasons.Count -gt 0){
+            $reasonText=($reasons | Sort-Object) -join ','
+            $period=[math]::Floor([datetimeoffset]::Now.ToUnixTimeSeconds()/300)
+            Alert-Once -Key $key -Fingerprint ($reasonText+'|'+$period) -Type 'SentinelStoragePressure' -Severity 'HIGH' -Fields @{
+                Reasons=@($reasons);LogBytes=$storage.LogBytes;MaxTotalLogBytes=$capacity
+                EvidenceBytes=$storage.EvidenceBytes;MaxEvidenceBytes=$evidenceLimit;FreeBytes=$storage.FreeBytes
+            }
+        }elseif($lastAlerts.ContainsKey($key)){
+            if(Write-SentinelJsonLine $alertLog ([ordered]@{Type='SentinelStorageRecovered';Severity='INFO';Reason='Capacity warning thresholds cleared.'})){Clear-AlertKey $key}
+        }
+    }catch{
+        $period=[math]::Floor([datetimeoffset]::Now.ToUnixTimeSeconds()/300)
+        Alert-Once -Key $key -Fingerprint ('Unverified|'+$period) -Type 'SentinelStorageUnverified' -Severity 'HIGH' -Fields @{Reason=$_.Exception.Message}
+    }
+}
+
 function Check-SysmonBacklog {
     if(-not $config.Sysmon.Enabled){return}
     $backlog=Get-SentinelSysmonBacklog $Root $config
@@ -205,6 +236,7 @@ function Check-SysmonBacklog {
 }
 
 $lastHeartbeat = (Get-Date).AddSeconds(-1 * [int]$config.SelfDefense.HeartbeatSeconds)
+$lastStoragePressureCheck = [datetime]::MinValue
 
 try {
     while ($true) {
@@ -216,6 +248,10 @@ try {
         Check-Tasks
         Check-Heartbeats
         Check-SysmonBacklog
+        if (((Get-Date)-$lastStoragePressureCheck).TotalSeconds -ge 60) {
+            Check-SentinelStoragePressure
+            $lastStoragePressureCheck=Get-Date
+        }
         Check-FileIntegrity
         foreach ($logCheck in @(Get-SentinelLogHealth $Root)) {
             if (-not $logCheck.Healthy) {
