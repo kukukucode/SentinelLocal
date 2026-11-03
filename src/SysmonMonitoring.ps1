@@ -15,7 +15,7 @@
     }
     $batch=if($deferred){$RecordedBatch}else{Get-SentinelEventBatch -LogName 'Microsoft-Windows-Sysmon/Operational' -Cursor $cursor -CursorTime $time -Ids @(1,3,4,16,19,20,21,22,25,255) -BatchSize ([int]$Config.EventBatchSize)}
     if($batch.Reset) {
-        if(-not (Write-SentinelJsonLine (Join-Path $Root 'logs\alerts.jsonl') ([ordered]@{Type='EventLogCursorReset';Severity='HIGH';Log='Sysmon';PreviousCursor=$cursor}))) {throw 'Cannot persist Sysmon cursor reset.'}
+        if(-not $deferred -and -not (Write-SentinelJsonLine (Join-Path $Root 'logs\alerts.jsonl') ([ordered]@{Type='EventLogCursorReset';Severity='HIGH';Log='Sysmon';PreviousCursor=$cursor}))) {throw 'Cannot persist Sysmon cursor reset.'}
         $cache=@{};Write-SentinelAtomicJson $cachePath ([ordered]@{Processes=@()})
         Write-SentinelAtomicJson $cursorPath ([ordered]@{RecordId=0L;TimeCreated=''})
     }
@@ -59,7 +59,7 @@
                 }
             }
         } elseif($event.Id -eq 255) {
-            if(-not (Write-SentinelJsonLine (Join-Path $Root 'logs\alerts.jsonl') ([ordered]@{Type='SysmonTelemetryError';Severity='HIGH';RecordId=$event.RecordId;EventTime=$event.TimeCreated.ToString('o');Data=$data;Reason='Provider reported a telemetry error; do not assume complete process observation.'}))) {throw 'Cannot persist Sysmon telemetry error.'}
+            if(-not $deferred -and -not (Write-SentinelJsonLine (Join-Path $Root 'logs\alerts.jsonl') ([ordered]@{Type='SysmonTelemetryError';Severity='HIGH';RecordId=$event.RecordId;EventTime=$event.TimeCreated.ToString('o');Data=$data;Reason='Provider reported a telemetry error; do not assume complete process observation.'}))) {throw 'Cannot persist Sysmon telemetry error.'}
         } elseif($event.Id -in @(19,20,21,25)) {
             $kind=if($event.Id -eq 25){'SysmonProcessTampering'}else{'SysmonWmiPersistence'}
             if(-not (Write-SentinelJsonLine (Join-Path $Root 'logs\alerts.jsonl') ([ordered]@{Type=$kind;Severity='HIGH';EventId=$event.Id;RecordId=$event.RecordId;Data=$data;Reason='Suspicious telemetry requires review; no heuristic process termination.'}))) {throw 'Cannot persist Sysmon detection.'}
@@ -198,7 +198,14 @@ function Get-SentinelContentSignatureStatus {
         $entry=$script:SentinelSignatureCache[$key];$now=[datetimeoffset]::Now
         if($entry -and ($now-$entry.At).TotalSeconds -ge 0 -and ($now-$entry.At).TotalSeconds -le 15){return $entry.Status}
         $status=(Get-AuthenticodeSignature -FilePath $Path -ErrorAction Stop).Status
-        if($script:SentinelSignatureCache.Count -ge 256){$script:SentinelSignatureCache.Clear()}
+        if($script:SentinelSignatureCache.Count -ge 256){
+            $expired=@($script:SentinelSignatureCache.Keys | Where-Object {($now-$script:SentinelSignatureCache[$_].At).TotalSeconds -gt 15})
+            foreach($old in $expired){[void]$script:SentinelSignatureCache.Remove($old)}
+            if($script:SentinelSignatureCache.Count -ge 256){
+                $oldest=@($script:SentinelSignatureCache.GetEnumerator() | Sort-Object { $_.Value.At } | Select-Object -First 64)
+                foreach($old in $oldest){[void]$script:SentinelSignatureCache.Remove($old.Key)}
+            }
+        }
         $script:SentinelSignatureCache[$key]=[pscustomobject]@{At=$now;Status=$status}
         return $status
     }finally{$stream.Dispose()}
