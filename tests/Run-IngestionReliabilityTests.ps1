@@ -114,6 +114,96 @@ Test 'Real analysis helper drains durable work and is adopted and restarted usin
     }finally{if($script:analysisChild){if(-not $script:analysisChild.HasExited){$script:analysisChild.Kill();$script:analysisChild.WaitForExit()};$script:analysisChild.Dispose();$script:analysisChild=$null};$config=$configBefore}
 }
 function Get-SentinelSysmonAnalysisProcess{param($ProcessIdValue) return $script:AnalysisProcess}
+Test 'Deferred checkpoints are amortized and the recorded payload remains immutable' {
+    $root=Fixture 'amortized-progress';$script:Batch=[pscustomobject]@{Reset=$false;Events=@(1..80 | ForEach-Object {Event $_})};Receive-SentinelSysmonBatch $root $config
+    $payload=Get-ChildItem (Join-Path $root 'state\sysmon-analysis\pending') -Filter '*.json' | Select-Object -First 1
+    $hash=(Get-FileHash $payload.FullName).Hash;$script:ProgressWrites=0;$script:CacheWrites=0;$script:PayloadRewrites=0
+    $originalAtomic=${function:Write-SentinelAtomicJson}
+    function Write-SentinelAtomicJson{
+        param($Path,$Data)
+        if($Path -like '*.json.progress'){$script:ProgressWrites++}
+        if($Path -like '*\sysmon-correlations.json'){$script:CacheWrites++}
+        if($Path -like '*\sysmon-analysis\processing\*.json'){$script:PayloadRewrites++}
+        & $originalAtomic $Path $Data
+    }
+    function Get-SentinelSysmonMonotonicSeconds{return 0.0}
+    $script:Evaluations=0
+    [void](Invoke-SentinelPendingSysmonAnalysis $root $config {param($p) $script:Evaluations++;[pscustomobject]@{Score=15;Reasons=@()}} {})
+    Assert ($script:Evaluations -eq 80 -and $script:ProgressWrites -eq 3 -and $script:CacheWrites -eq 3 -and $script:PayloadRewrites -eq 0) 'Large payloads or correlation snapshots were still rewritten for each event.'
+    $metrics=Get-Content (Join-Path $root 'state\sysmon-analysis-metrics.json') -Raw | ConvertFrom-Json
+    Assert ($metrics.Events -eq 80 -and $metrics.CheckpointCount -eq 3 -and $metrics.PSObject.Properties['ScoringSeconds'] -and $metrics.PSObject.Properties['ResponseQueueSeconds'] -and $metrics.PSObject.Properties['CheckpointSeconds']) 'Analysis phase metrics do not describe the actual committed work.'
+    Assert ((Get-SentinelSysmonQueueState $root).PendingEvents -eq 0 -and (Get-Content (Join-Path $root 'state\sysmon-analysis-cursor.json') -Raw | ConvertFrom-Json).RecordId -eq 80) 'Batched checkpoint lost or falsely completed events.'
+    Assert (@(Read-SentinelLogRows (Join-Path $root 'logs\process-events.jsonl')).Count -eq 80) 'Evaluation duplicated original acquisition evidence.'
+}
+Test 'Failure inside a checkpoint window replays only its unacknowledged prefix' {
+    $root=Fixture 'checkpoint-retry';$script:Batch=[pscustomobject]@{Reset=$false;Events=@(1..40 | ForEach-Object {Event $_})};Receive-SentinelSysmonBatch $root $config
+    $payload=Get-ChildItem (Join-Path $root 'state\sysmon-analysis\pending') -Filter '*.json' | Select-Object -First 1;$hash=(Get-FileHash $payload.FullName).Hash
+    function Get-SentinelSysmonMonotonicSeconds{return 0.0}
+    $script:EvaluatedIds=[Collections.Generic.List[int]]::new();$script:FailRequest=$true
+    $score={param($p) [pscustomobject]@{Score=80;Reasons=@('Fixture')}}
+    $queue={param($path,$id,$rating,$observed) if($id -eq 1035 -and $script:FailRequest){throw 'Synthetic response failure'};$script:EvaluatedIds.Add($id);Assert ($observed.ObservedSHA256 -eq ('A'*64)) 'Observed hash changed during replay.'}
+    Refused {Invoke-SentinelPendingSysmonAnalysis $root $config $score $queue}
+    $processing=Get-ChildItem (Join-Path $root 'state\sysmon-analysis\processing') -Filter '*.json' | Select-Object -First 1
+    Assert ((Get-FileHash $processing.FullName).Hash -eq $hash -and (Get-SentinelSysmonQueueState $root).PendingEvents -eq 10) 'Failure rewrote payload or acknowledged an incomplete window.'
+    $progress=Get-Content ($processing.FullName+'.progress') -Raw | ConvertFrom-Json
+    Assert ($progress.NextIndex -eq 30 -and (Get-Content (Join-Path $root 'state\sysmon-analysis-cursor.json') -Raw | ConvertFrom-Json).RecordId -eq 30) 'Checkpoint skipped the failed event.'
+    $script:FailRequest=$false;[void](Invoke-SentinelPendingSysmonAnalysis $root $config $score $queue)
+    Assert ((Get-SentinelSysmonQueueState $root).PendingEvents -eq 0 -and @($script:EvaluatedIds | Where-Object {$_ -eq 1001}).Count -eq 1 -and @($script:EvaluatedIds | Where-Object {$_ -eq 1031}).Count -eq 2) 'Retry did not resume at the last durable checkpoint.'
+}
+Test 'Corrupt progress and changed payloads cannot skip work' {
+    $root=Fixture 'progress-binding';$script:Batch=[pscustomobject]@{Reset=$false;Events=@((Event 1),(Event 2))};Receive-SentinelSysmonBatch $root $config
+    function Get-SentinelSysmonMonotonicSeconds{if($script:MonoCalls++ -eq 0){return 0.0};return 10.0}
+    $script:MonoCalls=0;[void](Invoke-SentinelPendingSysmonAnalysis $root $config {param($p) [pscustomobject]@{Score=0;Reasons=@()}} {})
+    $payload=Get-ChildItem (Join-Path $root 'state\sysmon-analysis\processing') -Filter '*.json' | Select-Object -First 1
+    $sidecar=$payload.FullName+'.progress';Assert ((Get-SentinelSysmonQueueState $root).PendingEvents -eq 1) 'Partial window fixture failed.'
+    $good=[IO.File]::ReadAllBytes($sidecar);$progress=Get-Content $sidecar -Raw | ConvertFrom-Json;$progress.NextIndex=3;Write-SentinelAtomicJson $sidecar $progress
+    Refused {Get-SentinelSysmonQueueState $root};Refused {Invoke-SentinelPendingSysmonAnalysis $root $config {throw 'Must not evaluate corrupt progress'} {}}
+    [IO.File]::WriteAllBytes($sidecar,$good);$bytes=[IO.File]::ReadAllBytes($payload.FullName);[IO.File]::AppendAllText($payload.FullName,' ')
+    Refused {Get-SentinelSysmonQueueState $root}
+    [IO.File]::WriteAllBytes($payload.FullName,$bytes)
+    [IO.File]::Move($payload.FullName,($payload.FullName+'.saved'));Refused {Get-SentinelSysmonQueueState $root}
+    [IO.File]::Move(($payload.FullName+'.saved'),$payload.FullName)
+    [void](Invoke-SentinelPendingSysmonAnalysis $root $config {param($p) [pscustomobject]@{Score=0;Reasons=@()}} {})
+    Assert ((Get-SentinelSysmonQueueState $root).PendingEvents -eq 0) 'Restored payload/progress could not resume.'
+}
+Test 'Producer uses free slots and avoids querying the native source while saturated' {
+    $root=Fixture 'adaptive-capacity';$small=$config | ConvertTo-Json -Depth 20 | ConvertFrom-Json;$small.Resources.MaxQueueCount=5;$small.Resources.HighQueueReserve=1;$small.EventBatchSize=3
+    $script:NativeQueries=0;$script:QueryLimits=[Collections.Generic.List[int]]::new()
+    function Get-SentinelEventBatch{param($LogName,$Cursor,$CursorTime,$Ids,$BatchSize) $script:NativeQueries++;$script:QueryLimits.Add($BatchSize);[pscustomobject]@{Reset=$false;Events=@(1..8 | Where-Object {$_ -gt $Cursor} | Select-Object -First $BatchSize | ForEach-Object {Event $_})}}
+    Receive-SentinelSysmonBatch $root $small;Receive-SentinelSysmonBatch $root $small
+    Assert (($script:QueryLimits -join ',') -eq '3,2' -and (Get-SentinelSysmonQueueState $root).PendingEvents -eq 5) 'Producer discarded free slots or exceeded capacity.'
+    Refused {Receive-SentinelSysmonBatch $root $small}
+    Assert ($script:NativeQueries -eq 2 -and (Get-Content (Join-Path $root 'state\sysmon-cursor.json') -Raw | ConvertFrom-Json).RecordId -eq 5) 'Full queue performed a wasted source query or advanced its cursor.'
+    [void](Invoke-SentinelPendingSysmonAnalysis $root $small {param($p) [pscustomobject]@{Score=0;Reasons=@()}} {})
+    Receive-SentinelSysmonBatch $root $small
+    Assert ((Get-SentinelSysmonQueueState $root).PendingEvents -eq 5 -and (Get-Content (Join-Path $root 'state\sysmon-cursor.json') -Raw | ConvertFrom-Json).RecordId -eq 8) 'Capacity recovery skipped source events.'
+    Assert (@(Read-SentinelLogRows (Join-Path $root 'logs\process-events.jsonl')).Count -eq 8) 'Adaptive batches lost or duplicated acquisition evidence.'
+}
+Test 'A legacy partially processed unit resumes at its existing acknowledged position' {
+    $root=Fixture 'legacy-progress';$script:Batch=[pscustomobject]@{Reset=$false;Events=@(1..40 | ForEach-Object {Event $_})};Receive-SentinelSysmonBatch $root $config
+    $file=Get-ChildItem (Join-Path $root 'state\sysmon-analysis\pending') -Filter '*.json' | Select-Object -First 1
+    $unit=Get-Content $file.FullName -Raw | ConvertFrom-Json;$unit.NextIndex=17;Write-SentinelAtomicJson $file.FullName $unit
+    Write-SentinelAtomicJson (Join-Path $root 'state\sysmon-analysis-cursor.json') @{RecordId=17;TimeCreated=$unit.Events[16].TimeCreated}
+    function Get-SentinelSysmonMonotonicSeconds{return 0.0}
+    $script:LegacyIds=[Collections.Generic.List[int]]::new()
+    [void](Invoke-SentinelPendingSysmonAnalysis $root $config {param($p) $script:LegacyIds.Add($p.ProcessId);[pscustomobject]@{Score=0;Reasons=@()}} {})
+    Assert ($script:LegacyIds.Count -eq 23 -and $script:LegacyIds[0] -eq 1018 -and $script:LegacyIds[-1] -eq 1040 -and (Get-SentinelSysmonQueueState $root).PendingEvents -eq 0) 'Migration replayed an already acknowledged legacy prefix or lost remaining work.'
+}
+Test 'Interrupted completed-payload cleanup replays conservatively instead of losing work' {
+    $root=Fixture 'cleanup-recovery';$script:Batch=[pscustomobject]@{Reset=$false;Events=@((Event 1),(Event 2))};Receive-SentinelSysmonBatch $root $config
+    function Get-SentinelSysmonMonotonicSeconds{return 0.0}
+    $script:FailDelete=$true;$script:ReplayCount=0
+    function Remove-Item{
+        [CmdletBinding()]param($LiteralPath,[switch]$Force)
+        if($LiteralPath -like '*\sysmon-analysis\processing\*.json' -and $script:FailDelete){$script:FailDelete=$false;throw 'Synthetic interruption before payload deletion'}
+        Microsoft.PowerShell.Management\Remove-Item @PSBoundParameters
+    }
+    $score={param($p) $script:ReplayCount++;[pscustomobject]@{Score=0;Reasons=@()}}
+    Refused {Invoke-SentinelPendingSysmonAnalysis $root $config $score {}}
+    Assert ((Get-SentinelSysmonQueueState $root).PendingEvents -eq 2) 'Incomplete cleanup hid work using an orphan acknowledgement.'
+    [void](Invoke-SentinelPendingSysmonAnalysis $root $config $score {})
+    Assert ((Get-SentinelSysmonQueueState $root).PendingEvents -eq 0 -and $script:ReplayCount -eq 4 -and @(Read-SentinelLogRows (Join-Path $root 'logs\process-events.jsonl')).Count -eq 2) 'Cleanup recovery lost work or duplicated source evidence.'
+}
 Test 'Healthy heartbeat does not conceal delayed events while quiet sources remain healthy' {
     $root=Fixture 'backlog';$now=[datetimeoffset]::Now
     Write-SentinelAtomicJson (Join-Path $root 'state\sysmon-analysis-heartbeat.json') @{Version=$config.Version;Status='Running';ProcessId=99;LastUpdated=$now.ToString('o')}

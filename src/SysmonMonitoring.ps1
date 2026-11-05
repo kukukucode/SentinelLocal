@@ -1,5 +1,5 @@
 ﻿function Read-SentinelSysmon {
-    param([string]$Root,$Config,[scriptblock]$ScoreProcess,[scriptblock]$QueueResponse,[ValidateRange(1,60)][int]$MaximumProcessingSeconds=10,$RecordedBatch,[scriptblock]$AfterEvent)
+    param([string]$Root,$Config,[scriptblock]$ScoreProcess,[scriptblock]$QueueResponse,[ValidateRange(1,60)][int]$MaximumProcessingSeconds=10,$RecordedBatch,[scriptblock]$AfterEvent,[ValidateRange(1,1000)][int]$CommitBatchSize=1,[hashtable]$AnalysisTimings)
     if(-not $Config.Sysmon.Enabled) {return}
     $deferred=$null -ne $RecordedBatch
     $cursorPath=Join-Path $Root $(if($deferred){'state\sysmon-analysis-cursor.json'}else{'state\sysmon-cursor.json'});$cachePath=Join-Path $Root 'state\sysmon-correlations.json'
@@ -20,6 +20,23 @@
         Write-SentinelAtomicJson $cursorPath ([ordered]@{RecordId=0L;TimeCreated=''})
     }
     $processingStarted=Get-SentinelSysmonMonotonicSeconds
+    $uncommitted=0;$lastCompleted=$null
+    $commitState={
+        param($completed)
+        # Cache must be durable before acknowledging the completed prefix.
+        $storeStarted=if($AnalysisTimings){Get-SentinelSysmonMonotonicSeconds}else{0.0}
+        try{
+            Write-SentinelAtomicJson $cachePath ([ordered]@{Processes=@($cache.Values)})
+            Write-SentinelAtomicJson $cursorPath ([ordered]@{RecordId=[long]$completed.RecordId;TimeCreated=$completed.TimeCreated.ToString('o')})
+            if($AfterEvent){& $AfterEvent $completed}
+        }finally{if($AnalysisTimings){$AnalysisTimings.CheckpointSeconds+=(Get-SentinelSysmonMonotonicSeconds)-$storeStarted;$AnalysisTimings.CheckpointCount++}}
+    }
+    $queueAction={
+        param($targetPath,$processIdValue,$rating,$observed)
+        $queueStarted=if($AnalysisTimings){Get-SentinelSysmonMonotonicSeconds}else{0.0}
+        try{& $QueueResponse $targetPath $processIdValue $rating $observed}
+        finally{if($AnalysisTimings){$AnalysisTimings.ResponseQueueSeconds+=(Get-SentinelSysmonMonotonicSeconds)-$queueStarted}}
+    }
     foreach($event in @($batch.Events)) {
         $data=Get-SentinelEventData $event
         if(-not $deferred -and -not (Write-SentinelJsonLine (Join-Path $Root 'logs\sysmon-events.jsonl') ([ordered]@{Type='SysmonEvent';EventId=$event.Id;RecordId=$event.RecordId;EventTime=$event.TimeCreated.ToString('o');Data=$data}))) {throw 'Cannot persist Sysmon event.'}
@@ -30,13 +47,14 @@
             $process=ConvertFrom-SentinelSysmonProcess $data
             $complete=$process.ProcessId -gt 0 -and [IO.Path]::IsPathRooted($process.ExecutablePath) -and $process.CommandLine -and $process.ProcessGuid -and $process.ObservedSHA256
             if(-not $deferred -and -not (Write-SentinelJsonLine (Join-Path $Root 'logs\process-events.jsonl') ([ordered]@{Type='ProcessCreated';Source='Sysmon';RecordId=$event.RecordId;EventTime=$event.TimeCreated.ToString('o');MetadataComplete=[bool]$complete;Process=$process}))) {throw 'Cannot persist recorded process identity.'}
-            $score=& $ScoreProcess $process
-            if($score.Score -ge [int]$Config.ScorePolicy.DefenderCustomScan -and -not (Test-SentinelException -Path $process.ExecutablePath -Config $Config)) {& $QueueResponse $process.ExecutablePath $process.ProcessId $score $process}
+            $scoreStarted=if($AnalysisTimings){Get-SentinelSysmonMonotonicSeconds}else{0.0}
+            try{$score=& $ScoreProcess $process}finally{if($AnalysisTimings){$AnalysisTimings.ScoringSeconds+=(Get-SentinelSysmonMonotonicSeconds)-$scoreStarted}}
+            if($score.Score -ge [int]$Config.ScorePolicy.DefenderCustomScan -and -not (Test-SentinelException -Path $process.ExecutablePath -Config $Config)) {& $queueAction $process.ExecutablePath $process.ProcessId $score $process}
             if($score.Score -gt 0 -and $Config.ScanReferencedScripts) {
                 $scriptScore=[pscustomobject]@{Score=[math]::Max($score.Score,[int]$Config.ScorePolicy.DefenderCustomScan);Reasons=@($score.Reasons)+@('Referenced script static scan')}
-                foreach($target in @(Get-SentinelScriptTargets -ExecutablePath $process.ExecutablePath -CommandLine $process.CommandLine)) {if(-not (Test-SentinelException -Path $target -Config $Config)){& $QueueResponse $target 0 $scriptScore $null}}
+                foreach($target in @(Get-SentinelScriptTargets -ExecutablePath $process.ExecutablePath -CommandLine $process.CommandLine)) {if(-not (Test-SentinelException -Path $target -Config $Config)){& $queueAction $target 0 $scriptScore $null}}
                 $decoded=Save-SentinelDecodedCommand -Root $Root -CommandLine $process.CommandLine -ExecutablePath $process.ExecutablePath
-                if($decoded) {& $QueueResponse $decoded 0 $scriptScore $null}
+                if($decoded) {& $queueAction $decoded 0 $scriptScore $null}
             }
             # Zero-score metadata is already durable; cache correlation candidates only.
             if($process.ProcessGuid -and $score.Score -gt 0) {
@@ -54,7 +72,7 @@
                     $score=[pscustomobject]@{Score=([int]$row.BaseScore+$boost);Reasons=@($row.Reasons)+@('ProcessGuid-correlated Sysmon network/DNS context')}
                     if($score.Score -ge [int]$Config.ScorePolicy.DefenderCustomScan) {
                         if(-not (Write-SentinelJsonLine (Join-Path $Root 'logs\alerts.jsonl') ([ordered]@{Type='SysmonCorrelatedActivity';Severity='MEDIUM';ProcessGuid=$guid;EventId=$event.Id;Score=$score.Score;Data=$data}))) {throw 'Cannot persist correlation alert.'}
-                        & $QueueResponse $row.Process.ExecutablePath $row.Process.ProcessId $score $row.Process
+                        & $queueAction $row.Process.ExecutablePath $row.Process.ProcessId $score $row.Process
                     }
                 }
             }
@@ -66,24 +84,24 @@
             $score=[pscustomobject]@{Score=[int]$Config.ScorePolicy.HighRisk;Reasons=@($kind)}
             if($event.Id -eq 25 -and $data.Image) {
                 $row=if($data.ProcessGuid -and $cache.ContainsKey([string]$data.ProcessGuid)){$cache[[string]$data.ProcessGuid]}else{$null}
-                if($row -and $row.Process.ExecutablePath -ieq [string]$data.Image) {& $QueueResponse $data.Image $row.Process.ProcessId $score $row.Process}
-                else {& $QueueResponse $data.Image 0 $score $null}
+                if($row -and $row.Process.ExecutablePath -ieq [string]$data.Image) {& $queueAction $data.Image $row.Process.ProcessId $score $row.Process}
+                else {& $queueAction $data.Image 0 $score $null}
             } elseif($event.Id -eq 20 -and $data.Destination) {
-                foreach($target in @(Get-SentinelPersistenceTargets ([string]$data.Destination))) {if(Test-Path -LiteralPath $target -PathType Leaf){& $QueueResponse $target 0 $score $null}}
+                foreach($target in @(Get-SentinelPersistenceTargets ([string]$data.Destination))) {if(Test-Path -LiteralPath $target -PathType Leaf){& $queueAction $target 0 $score $null}}
             }
         }
         if($cache.Count -gt 1000) {
             foreach($row in @($cache.Values | Sort-Object SeenAt | Select-Object -First ($cache.Count-1000))) {$cache.Remove([string]$row.Process.ProcessGuid)}
         }
-        # Save correlation before cursor. A queue/log failure leaves this durable event retryable.
-        Write-SentinelAtomicJson $cachePath ([ordered]@{Processes=@($cache.Values)})
-        Write-SentinelAtomicJson $cursorPath ([ordered]@{RecordId=[long]$event.RecordId;TimeCreated=$event.TimeCreated.ToString('o')})
-        if($AfterEvent){& $AfterEvent $event}
+        $lastCompleted=$event;$uncommitted++
+        $yield=(Get-SentinelSysmonMonotonicSeconds)-$processingStarted -ge $MaximumProcessingSeconds
+        if(-not $deferred -or $uncommitted -ge $CommitBatchSize -or $yield){& $commitState $lastCompleted;$uncommitted=0}
         # Yield only after this event is fully durable. A large backlog must not
         # monopolize the Watcher loop and starve heartbeat/Defender/health work.
         # One event (or the source query) can still exceed the cooperative budget.
-        if((Get-SentinelSysmonMonotonicSeconds)-$processingStarted -ge $MaximumProcessingSeconds){break}
+        if($yield){break}
     }
+    if($uncommitted -gt 0){& $commitState $lastCompleted}
 }
 
 function Get-SentinelSysmonMonotonicSeconds {
@@ -111,19 +129,40 @@ function Get-SentinelSysmonQueueState {
             if(($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $file.Length -gt 64MB -or $file.Name -cnotmatch '^\d{20}-[A-F0-9]{24}\.json$'){throw 'Unsafe or oversized analysis request refused.'}
             $unit=Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
             Assert-SentinelSysmonQueueUnit $unit
+            $progress=Read-SentinelSysmonAnalysisProgress $file.FullName $unit
             $units++
             $count+=@($unit.Events).Count-[int]$unit.NextIndex;$bytes+=$file.Length
+            if($progress){$bytes+=(Get-Item -LiteralPath ($file.FullName+'.progress')).Length}
             if($unit.NextIndex -lt @($unit.Events).Count){$at=[datetimeoffset]$unit.Events[[int]$unit.NextIndex].TimeCreated;if($null -eq $oldest -or $at -lt $oldest){$oldest=$at}}
             elseif(@($unit.Events).Count -eq 0 -and $unit.Reset){$at=[datetimeoffset]$unit.QueuedAt;if($null -eq $oldest -or $at -lt $oldest){$oldest=$at}}
+        }
+        foreach($sidecar in @(Get-ChildItem -LiteralPath $path -Filter '*.json.progress' -File -ErrorAction Stop)){
+            Assert-SentinelSysmonDataPath $sidecar.FullName
+            $payload=$sidecar.FullName.Substring(0,$sidecar.FullName.Length-'.progress'.Length)
+            if(-not (Test-Path -LiteralPath $payload -PathType Leaf)){throw 'Analysis progress exists without its payload; work state is unverified.'}
         }
     }
     [pscustomobject]@{PendingEvents=$count;Units=$units;Bytes=$bytes;OldestEventAt=$oldest}
     }finally{$mutex.ReleaseMutex();$mutex.Dispose()}
 }
 
+function Read-SentinelSysmonAnalysisProgress {
+    param([string]$Path,$Unit,[string]$PayloadSHA256)
+    $sidecar=$Path+'.progress'
+    if(-not (Test-Path -LiteralPath $sidecar)){return $null}
+    Assert-SentinelSysmonDataPath $sidecar
+    $file=Get-Item -LiteralPath $sidecar -ErrorAction Stop
+    if($file.PSIsContainer -or $file.Length -gt 4096){throw 'Invalid analysis progress file.'}
+    $progress=Get-Content -LiteralPath $sidecar -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    if(-not $PayloadSHA256){$PayloadSHA256=(Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash}
+    if($progress.Schema -ne 1 -or $progress.UnitName -cne [IO.Path]::GetFileName($Path) -or $progress.PayloadSHA256 -ine $PayloadSHA256 -or $progress.EventCount -ne @($Unit.Events).Count -or ($progress.NextIndex -isnot [int] -and $progress.NextIndex -isnot [long]) -or $progress.NextIndex -lt [int]$Unit.NextIndex -or $progress.NextIndex -gt @($Unit.Events).Count){throw 'Analysis progress does not match its immutable payload.'}
+    $Unit.NextIndex=[int]$progress.NextIndex
+    return $progress
+}
+
 function Assert-SentinelSysmonQueueUnit {
     param($Unit)
-    if($Unit.Schema -ne 1 -or $null -eq $Unit.NextIndex -or $Unit.NextIndex -lt 0 -or $Unit.NextIndex -gt @($Unit.Events).Count -or @($Unit.Events).Count -gt 1000 -or (@($Unit.Events).Count -eq 0 -and -not $Unit.Reset)){throw 'Invalid analysis queue unit.'}
+    if($Unit.Schema -ne 1 -or ($Unit.NextIndex -isnot [int] -and $Unit.NextIndex -isnot [long]) -or $Unit.NextIndex -lt 0 -or $Unit.NextIndex -gt @($Unit.Events).Count -or @($Unit.Events).Count -gt 1000 -or (@($Unit.Events).Count -eq 0 -and -not $Unit.Reset)){throw 'Invalid analysis queue unit.'}
     foreach($row in @($Unit.Events)){
         if($row.Id -notin @(1,3,4,16,19,20,21,22,25,255) -or [long]$row.RecordId -le 0 -or -not $row.Xml){throw 'Invalid recorded analysis event.'}
         [void][datetimeoffset]::Parse([string]$row.TimeCreated)
@@ -252,14 +291,19 @@ function Receive-SentinelSysmonBatch {
     $timer=[Diagnostics.Stopwatch]::StartNew()
     $cursorPath=Join-Path $Root 'state\sysmon-cursor.json';$cursor=0L;$time=''
     if(Test-Path -LiteralPath $cursorPath){$saved=Get-Content -LiteralPath $cursorPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop;$cursor=[long]$saved.RecordId;$time=[string]$saved.TimeCreated}
-    $limit=[math]::Min([int]$Config.EventBatchSize,[math]::Min(1000,[int]$Config.Resources.MaxQueueCount))
+    $queue=Get-SentinelSysmonQueueState $Root
+    $available=[int]$Config.Resources.MaxQueueCount-$queue.PendingEvents
+    if($available -le 0 -or $queue.Units -ge [int]$Config.Resources.MaxQueueCount){throw 'Sysmon analysis event capacity reached; source cursor retained.'}
+    if($queue.Bytes -ge [math]::Min(64MB,[long]$Config.Resources.MaxLogFileMB*1MB)){throw 'Sysmon analysis byte capacity reached; source cursor retained.'}
+    # Match the producer batch to free consumer slots instead of fetching a
+    # full batch that cannot fit, or querying the native log while saturated.
+    $limit=[math]::Min([int]$Config.EventBatchSize,[math]::Min(1000,$available))
     $batch=Get-SentinelEventBatch -LogName 'Microsoft-Windows-Sysmon/Operational' -Cursor $cursor -CursorTime $time -Ids @(1,3,4,16,19,20,21,22,25,255) -BatchSize $limit
     if($batch.Reset){
         if(-not (Write-SentinelJsonLine (Join-Path $Root 'logs\alerts.jsonl') ([ordered]@{Type='EventLogCursorReset';Severity='HIGH';Log='Sysmon';PreviousCursor=$cursor}))){throw 'Cannot persist source discontinuity.'}
     }
     $events=@($batch.Events)
     if(-not $events.Count -and -not $batch.Reset){return}
-    $queue=Get-SentinelSysmonQueueState $Root
     if($queue.PendingEvents+$events.Count -gt [int]$Config.Resources.MaxQueueCount -or $queue.Units -ge [int]$Config.Resources.MaxQueueCount){throw 'Sysmon analysis event capacity reached; source cursor retained.'}
     Assert-SentinelStorage -Root $Root -Config $Config
     $raw=@();$identities=@();$recorded=@()
@@ -305,6 +349,7 @@ function Receive-SentinelSysmonBatch {
 
 function Invoke-SentinelPendingSysmonAnalysis {
     param([string]$Root,$Config,[scriptblock]$ScoreProcess,[scriptblock]$QueueResponse,[scriptblock]$Progress)
+    $timer=[Diagnostics.Stopwatch]::StartNew()
     $directory=Join-Path $Root 'state\sysmon-analysis'
     Assert-SentinelSysmonDataPath $directory
     $queueMutex=Enter-SentinelLogLock (Join-Path $Root 'state\sysmon-analysis.queue')
@@ -323,22 +368,33 @@ function Invoke-SentinelPendingSysmonAnalysis {
     if(($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $file.Length -gt 64MB){throw 'Reparse or oversized analysis request refused.'}
     $unit=Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
     Assert-SentinelSysmonQueueUnit $unit
+    $payloadSHA256=(Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
+    [void](Read-SentinelSysmonAnalysisProgress $file.FullName $unit $payloadSHA256)
     }finally{$queueMutex.ReleaseMutex();$queueMutex.Dispose()}
     $events=@(for($i=[int]$unit.NextIndex;$i -lt @($unit.Events).Count;$i++){
         $row=$unit.Events[$i]
         $event=[pscustomobject]@{Id=[int]$row.Id;RecordId=[long]$row.RecordId;TimeCreated=([datetimeoffset]$row.TimeCreated).LocalDateTime;Xml=[string]$row.Xml;QueueIndex=$i}
         $event | Add-Member ScriptMethod ToXml {$this.Xml};$event
     })
-    $startedIndex=[int]$unit.NextIndex;$timer=[Diagnostics.Stopwatch]::StartNew()
-    Read-SentinelSysmon -Root $Root -Config $Config -ScoreProcess $ScoreProcess -QueueResponse $QueueResponse -MaximumProcessingSeconds 5 -RecordedBatch ([pscustomobject]@{Reset=($unit.Reset -and $unit.NextIndex -eq 0);Events=$events}) -AfterEvent {
+    $startedIndex=[int]$unit.NextIndex;$preparationSeconds=$timer.Elapsed.TotalSeconds
+    $timings=@{ScoringSeconds=0.0;ResponseQueueSeconds=0.0;CheckpointSeconds=0.0;CheckpointCount=0}
+    Read-SentinelSysmon -Root $Root -Config $Config -ScoreProcess $ScoreProcess -QueueResponse $QueueResponse -MaximumProcessingSeconds 5 -CommitBatchSize 30 -AnalysisTimings $timings -RecordedBatch ([pscustomobject]@{Reset=($unit.Reset -and $unit.NextIndex -eq 0);Events=$events}) -AfterEvent {
         param($completed)
         $unit.NextIndex=[int]$completed.QueueIndex+1
         $progressMutex=Enter-SentinelLogLock (Join-Path $Root 'state\sysmon-analysis.queue')
-        try{Write-SentinelAtomicJson $file.FullName $unit}finally{$progressMutex.ReleaseMutex();$progressMutex.Dispose()}
+        try{Write-SentinelAtomicJson ($file.FullName+'.progress') ([ordered]@{Schema=1;UnitName=$file.Name;PayloadSHA256=$payloadSHA256;EventCount=@($unit.Events).Count;NextIndex=[int]$unit.NextIndex})}finally{$progressMutex.ReleaseMutex();$progressMutex.Dispose()}
         if($Progress){& $Progress $completed}
     }
-    Write-SentinelAtomicJson (Join-Path $Root 'state\sysmon-analysis-metrics.json') ([ordered]@{LastUpdated=[datetimeoffset]::Now.ToString('o');Events=([int]$unit.NextIndex-$startedIndex);Seconds=$timer.Elapsed.TotalSeconds})
-    if($unit.NextIndex -eq @($unit.Events).Count){$progressMutex=Enter-SentinelLogLock (Join-Path $Root 'state\sysmon-analysis.queue');try{Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop}finally{$progressMutex.ReleaseMutex();$progressMutex.Dispose()}}
+    Write-SentinelAtomicJson (Join-Path $Root 'state\sysmon-analysis-metrics.json') ([ordered]@{LastUpdated=[datetimeoffset]::Now.ToString('o');Events=([int]$unit.NextIndex-$startedIndex);Seconds=$timer.Elapsed.TotalSeconds;PreparationSeconds=$preparationSeconds;ScoringSeconds=$timings.ScoringSeconds;ResponseQueueSeconds=$timings.ResponseQueueSeconds;CheckpointSeconds=$timings.CheckpointSeconds;CheckpointCount=$timings.CheckpointCount})
+    if($unit.NextIndex -eq @($unit.Events).Count){
+        $progressMutex=Enter-SentinelLogLock (Join-Path $Root 'state\sysmon-analysis.queue')
+        try{
+            # A crash between these deletes replays the payload conservatively;
+            # it cannot strand an orphan acknowledgement or lose pending work.
+            if(Test-Path -LiteralPath ($file.FullName+'.progress')){Remove-Item -LiteralPath ($file.FullName+'.progress') -Force -ErrorAction Stop}
+            Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
+        }finally{$progressMutex.ReleaseMutex();$progressMutex.Dispose()}
+    }
     return $true
 }
 
