@@ -251,12 +251,63 @@ Test 'Signature reuse is bound to locked actual bytes and expires even for an un
     $path=Join-Path $ScratchRoot 'signature.fixture';[IO.File]::WriteAllText($path,'AAAA');$mtime=(Get-Item $path).LastWriteTimeUtc
     $script:SignatureCalls=0;$script:SignatureLockObserved=$false;$script:SentinelSignatureCache=@{}
     function Get-AuthenticodeSignature{param($FilePath) $script:SignatureCalls++;try{[IO.File]::WriteAllText($FilePath,'BBBB')}catch{$script:SignatureLockObserved=$true};[pscustomobject]@{Status=$(if([IO.File]::ReadAllText($FilePath) -eq 'AAAA'){'Valid'}else{'HashMismatch'})}}
-    Assert ((Get-SentinelContentSignatureStatus $path) -eq 'Valid' -and (Get-SentinelContentSignatureStatus $path) -eq 'Valid' -and $script:SignatureCalls -eq 1 -and $script:SignatureLockObserved) 'Content lock or reuse failed.'
+    $details=New-SentinelScoringTimings
+    Assert ((Get-SentinelContentSignatureStatus $path -Timings $details) -eq 'Valid' -and (Get-SentinelContentSignatureStatus $path -Timings $details) -eq 'Valid' -and $script:SignatureCalls -eq 1 -and $script:SignatureLockObserved) 'Content lock or reuse failed.'
     [IO.File]::WriteAllText($path,'BBBB');(Get-Item $path).LastWriteTimeUtc=$mtime
-    Assert ((Get-SentinelContentSignatureStatus $path) -eq 'HashMismatch' -and $script:SignatureCalls -eq 2) 'Same-length same-time replacement reused trust.'
+    Assert ((Get-SentinelContentSignatureStatus $path -Timings $details) -eq 'HashMismatch' -and $script:SignatureCalls -eq 2) 'Same-length same-time replacement reused trust.'
     foreach($entry in $script:SentinelSignatureCache.Values){$entry.At=[datetimeoffset]::Now.AddSeconds(-16)}
-    [void](Get-SentinelContentSignatureStatus $path)
+    [void](Get-SentinelContentSignatureStatus $path -Timings $details)
     Assert ($script:SignatureCalls -eq 3) 'Expired status was reused.'
+    Assert ($details.SignatureCacheHits -eq 1 -and $details.SignatureCacheMisses -eq 3 -and $details.SignatureBytesHashed -eq 16) 'Phase counters skipped byte validation or counted a cache hit as a verification.'
+}
+Test 'Original filename reads apply only to ProgramData without changing signature or rename scores' {
+    $tokens=$null;$parseErrors=$null
+    $watcherAst=[Management.Automation.Language.Parser]::ParseFile((Join-Path $repo 'src\Watcher.ps1'),[ref]$tokens,[ref]$parseErrors)
+    foreach($name in @('Get-ProcessScore','Get-FileSignatureStatus','Test-RandomishSegment')){
+        $definition=$watcherAst.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true)
+        . ([scriptblock]::Create($definition.Extent.Text))
+    }
+    $Root=$ScratchRoot;$script:OriginalCalls=0;$script:SignatureChecks=0;$script:OriginalValue='different.exe';$script:SignedState='Valid';$script:FilePresent=$true;$script:ScoreErrors=0
+    function Test-SentinelInternalResponse{return $false}
+    function Test-Path{return $script:FilePresent}
+    function Get-SentinelContentSignatureStatus{param($Path,$Timings) $script:SignatureChecks++;return $script:SignedState}
+    function Get-SentinelOriginalFilename{$script:OriginalCalls++;return $script:OriginalValue}
+    function Write-SentinelError{$script:ScoreErrors++}
+    $details=New-SentinelScoringTimings
+    $process=[pscustomobject]@{ExecutablePath='C:\Windows\fixture.exe';Name='fixture.exe';CommandLine='fixture.exe'}
+    $score=Get-ProcessScore $process -Timings $details
+    Assert ($score.Score -eq 0 -and $script:OriginalCalls -eq 0 -and $script:SignatureChecks -eq 1 -and $details.OriginalFilenameReads -eq 0) 'Unrelated binaries still read PE versions or bypassed signatures.'
+    $process.ExecutablePath='C:\ProgramData\vendor\fixture.exe'
+    Assert ((Get-ProcessScore $process -Timings $details).Score -eq 25 -and $script:OriginalCalls -eq 1 -and $details.OriginalFilenameReads -eq 1) 'ProgramData rename score changed.'
+    $script:OriginalValue='fixture.exe'
+    Assert ((Get-ProcessScore $process).Score -eq 0) 'An unchanged original filename gained a score.'
+    $script:SignedState='HashMismatch'
+    Assert ((Get-ProcessScore $process).Score -eq 15) 'Invalid signature score changed.'
+    $script:FilePresent=$false
+    Assert ((Get-ProcessScore $process).Score -eq 15 -and $script:SignatureChecks -eq 4) 'Missing target semantics changed.'
+    $script:FilePresent=$true
+    function Get-SentinelOriginalFilename{throw 'Version resource unavailable'}
+    Assert ((Get-ProcessScore $process -Timings $details).Score -eq 15 -and $script:ScoreErrors -eq 1) 'Metadata failure discarded the signature score or failed silently.'
+}
+Test 'Scoring phase counters survive the deferred callback and are exported with confirmed work' {
+    $root=Fixture 'score-details';$script:Batch=[pscustomobject]@{Reset=$false;Events=@((Event 9001))};Receive-SentinelSysmonBatch $root $config
+    [void](Invoke-SentinelPendingSysmonAnalysis $root $config {param($process,$details) $details.SignatureCacheHits++;$details.SignatureBytesHashed+=123;[pscustomobject]@{Score=0;Reasons=@()}} {})
+    $metrics=Get-Content -LiteralPath (Join-Path $root 'state\sysmon-analysis-metrics.json') -Raw | ConvertFrom-Json
+    Assert ($metrics.Events -eq 1 -and $metrics.ScoringDetails.SignatureCacheHits -eq 1 -and $metrics.ScoringDetails.SignatureBytesHashed -eq 123) 'Scoring breakdown was lost or falsely acknowledged.'
+}
+Test 'Read-only scoring diagnostic profiles actual pending files without acknowledging or rewriting work' {
+    $root=Fixture 'read-only-score';$executable=Join-Path $root 'fixture.exe'
+    Copy-Item -LiteralPath (Join-Path $env:WINDIR 'System32\cmd.exe') -Destination $executable
+    $event=Event 9101;$event.Xml=$event.Xml.Replace('C:\Deleted\fixture.exe',[Security.SecurityElement]::Escape($executable))
+    $script:Batch=[pscustomobject]@{Reset=$false;Events=@($event)};Receive-SentinelSysmonBatch $root $config
+    $before=@(Get-ChildItem -LiteralPath $root -File -Recurse | ForEach-Object {($_.FullName.Substring($root.Length))+'|'+(Get-FileHash -LiteralPath $_.FullName).Hash} | Sort-Object)
+    $output=Join-Path $ScratchRoot 'read-only-scoring-output'
+    & (Join-Path $repo 'tools\diagnostics\Measure-SentinelScoring.ps1') -Root $root -OutputDirectory $output -SampleCount 1
+    $report=Get-Content -LiteralPath (Join-Path $output 'scoring.json') -Raw | ConvertFrom-Json
+    $after=@(Get-ChildItem -LiteralPath $root -File -Recurse | ForEach-Object {($_.FullName.Substring($root.Length))+'|'+(Get-FileHash -LiteralPath $_.FullName).Hash} | Sort-Object)
+    Assert (($before -join "`n") -ceq ($after -join "`n")) 'The diagnostic changed installed files or acknowledged work.'
+    Assert ($report.ReadOnly -and -not $report.QueueAcknowledged -and -not $report.TrialProcessesLaunched -and $report.Rows.Count -eq 2 -and $report.ProfiledProcessEvents -eq 1 -and $report.Rows[0].ScoringDetails.SignatureBytesHashed -gt 0 -and $report.Rows[1].ScoringDetails.SignatureCacheHits -eq 1) 'Actual scoring phases were not exercised in both passes.'
+    Assert ((Get-SentinelSysmonQueueState $root).PendingEvents -eq 1) 'Profiling consumed the event.'
 }
 Test 'Guardian warns on backlog and records recovery without suppressing failed alert writes' {
     $root=Fixture 'guardian';$alertLog=Join-Path $root 'logs\alerts.jsonl';$lastAlertStatePath=Join-Path $root 'state\integrity-last-alerts.json';$lastAlerts=@{}

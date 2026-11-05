@@ -1,6 +1,7 @@
 ﻿function Read-SentinelSysmon {
     param([string]$Root,$Config,[scriptblock]$ScoreProcess,[scriptblock]$QueueResponse,[ValidateRange(1,60)][int]$MaximumProcessingSeconds=10,$RecordedBatch,[scriptblock]$AfterEvent,[ValidateRange(1,1000)][int]$CommitBatchSize=1,[hashtable]$AnalysisTimings)
     if(-not $Config.Sysmon.Enabled) {return}
+    if($AnalysisTimings -and -not $AnalysisTimings.ScoringDetails){$AnalysisTimings.ScoringDetails=New-SentinelScoringTimings}
     $deferred=$null -ne $RecordedBatch
     $cursorPath=Join-Path $Root $(if($deferred){'state\sysmon-analysis-cursor.json'}else{'state\sysmon-cursor.json'});$cachePath=Join-Path $Root 'state\sysmon-correlations.json'
     $cursor=0L;$time='';$cache=@{}
@@ -48,7 +49,7 @@
             $complete=$process.ProcessId -gt 0 -and [IO.Path]::IsPathRooted($process.ExecutablePath) -and $process.CommandLine -and $process.ProcessGuid -and $process.ObservedSHA256
             if(-not $deferred -and -not (Write-SentinelJsonLine (Join-Path $Root 'logs\process-events.jsonl') ([ordered]@{Type='ProcessCreated';Source='Sysmon';RecordId=$event.RecordId;EventTime=$event.TimeCreated.ToString('o');MetadataComplete=[bool]$complete;Process=$process}))) {throw 'Cannot persist recorded process identity.'}
             $scoreStarted=if($AnalysisTimings){Get-SentinelSysmonMonotonicSeconds}else{0.0}
-            try{$score=& $ScoreProcess $process}finally{if($AnalysisTimings){$AnalysisTimings.ScoringSeconds+=(Get-SentinelSysmonMonotonicSeconds)-$scoreStarted}}
+            try{if($AnalysisTimings){$score=& $ScoreProcess $process $AnalysisTimings.ScoringDetails}else{$score=& $ScoreProcess $process}}finally{if($AnalysisTimings){$AnalysisTimings.ScoringSeconds+=(Get-SentinelSysmonMonotonicSeconds)-$scoreStarted}}
             if($score.Score -ge [int]$Config.ScorePolicy.DefenderCustomScan -and -not (Test-SentinelException -Path $process.ExecutablePath -Config $Config)) {& $queueAction $process.ExecutablePath $process.ProcessId $score $process}
             if($score.Score -gt 0 -and $Config.ScanReferencedScripts) {
                 $scriptScore=[pscustomobject]@{Score=[math]::Max($score.Score,[int]$Config.ScorePolicy.DefenderCustomScan);Reasons=@($score.Reasons)+@('Referenced script static scan')}
@@ -247,19 +248,34 @@ function Get-SentinelRecentBatchRate {
     return $null
 }
 
-function Get-SentinelContentSignatureStatus {
+function New-SentinelScoringTimings {
+    return @{InternalResponseSeconds=0.0;SignatureOpenSeconds=0.0;SignatureHashSeconds=0.0;AuthenticodeSeconds=0.0;OriginalFilenameSeconds=0.0;SignatureCacheHits=0;SignatureCacheMisses=0;SignatureBytesHashed=0L;OriginalFilenameReads=0}
+}
+
+function Get-SentinelOriginalFilename {
     param([string]$Path)
+    return (Get-Item -LiteralPath $Path -ErrorAction Stop).VersionInfo.OriginalFilename
+}
+
+function Get-SentinelContentSignatureStatus {
+    param([string]$Path,[hashtable]$Timings)
     # Deny writes/deletes while binding the status to actual file bytes. Neither
     # a recorded hash nor a path/mtime is sufficient to reuse a trust decision.
-    $stream=[IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+    $phase=if($Timings){[Diagnostics.Stopwatch]::StartNew()}else{$null}
+    try{$stream=[IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)}
+    finally{if($Timings){$Timings.SignatureOpenSeconds+=$phase.Elapsed.TotalSeconds}}
     try{
         $sha=[Security.Cryptography.SHA256]::Create()
-        try{$hash=([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-','')}finally{$sha.Dispose()}
+        if($Timings){$phase.Restart()}
+        try{$hash=([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-','');if($Timings){$Timings.SignatureBytesHashed+=$stream.Length}}
+        finally{$sha.Dispose();if($Timings){$Timings.SignatureHashSeconds+=$phase.Elapsed.TotalSeconds}}
         $key=[IO.Path]::GetFullPath($Path).ToLowerInvariant()+'|'+$hash
         if(-not $script:SentinelSignatureCache){$script:SentinelSignatureCache=@{}}
         $entry=$script:SentinelSignatureCache[$key];$now=[datetimeoffset]::Now
-        if($entry -and ($now-$entry.At).TotalSeconds -ge 0 -and ($now-$entry.At).TotalSeconds -le 15){return $entry.Status}
-        $status=(Get-AuthenticodeSignature -FilePath $Path -ErrorAction Stop).Status
+        if($entry -and ($now-$entry.At).TotalSeconds -ge 0 -and ($now-$entry.At).TotalSeconds -le 15){if($Timings){$Timings.SignatureCacheHits++};return $entry.Status}
+        if($Timings){$Timings.SignatureCacheMisses++;$phase.Restart()}
+        try{$status=(Get-AuthenticodeSignature -FilePath $Path -ErrorAction Stop).Status}
+        finally{if($Timings){$Timings.AuthenticodeSeconds+=$phase.Elapsed.TotalSeconds}}
         if($script:SentinelSignatureCache.Count -ge 256){$script:SentinelSignatureCache.Clear()}
         $script:SentinelSignatureCache[$key]=[pscustomobject]@{At=$now;Status=$status}
         return $status
@@ -385,7 +401,7 @@ function Invoke-SentinelPendingSysmonAnalysis {
         try{Write-SentinelAtomicJson ($file.FullName+'.progress') ([ordered]@{Schema=1;UnitName=$file.Name;PayloadSHA256=$payloadSHA256;EventCount=@($unit.Events).Count;NextIndex=[int]$unit.NextIndex})}finally{$progressMutex.ReleaseMutex();$progressMutex.Dispose()}
         if($Progress){& $Progress $completed}
     }
-    Write-SentinelAtomicJson (Join-Path $Root 'state\sysmon-analysis-metrics.json') ([ordered]@{LastUpdated=[datetimeoffset]::Now.ToString('o');Events=([int]$unit.NextIndex-$startedIndex);Seconds=$timer.Elapsed.TotalSeconds;PreparationSeconds=$preparationSeconds;ScoringSeconds=$timings.ScoringSeconds;ResponseQueueSeconds=$timings.ResponseQueueSeconds;CheckpointSeconds=$timings.CheckpointSeconds;CheckpointCount=$timings.CheckpointCount})
+    Write-SentinelAtomicJson (Join-Path $Root 'state\sysmon-analysis-metrics.json') ([ordered]@{LastUpdated=[datetimeoffset]::Now.ToString('o');Events=([int]$unit.NextIndex-$startedIndex);Seconds=$timer.Elapsed.TotalSeconds;PreparationSeconds=$preparationSeconds;ScoringSeconds=$timings.ScoringSeconds;ScoringDetails=$timings.ScoringDetails;ResponseQueueSeconds=$timings.ResponseQueueSeconds;CheckpointSeconds=$timings.CheckpointSeconds;CheckpointCount=$timings.CheckpointCount})
     if($unit.NextIndex -eq @($unit.Events).Count){
         $progressMutex=Enter-SentinelLogLock (Join-Path $Root 'state\sysmon-analysis.queue')
         try{
