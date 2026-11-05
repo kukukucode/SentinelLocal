@@ -146,28 +146,51 @@ function Test-SentinelSysmonAnalysisIdentity {
 
 function Get-SentinelSysmonBacklog {
     param([string]$Root,$Config)
-    $at=[datetimeoffset]::Now
-    try{
+    $started=Get-SentinelSysmonClock
+    $at=$started;$heartbeatCheckedAt=$null;$sourceSeconds=$null;$queueSeconds=$null;$processSeconds=$null
+    $result=try{
+        $timer=[Diagnostics.Stopwatch]::StartNew()
         $sourceState=Get-SentinelSysmonSourceState
         if(-not $sourceState.Running -or -not $sourceState.ChannelEnabled){throw 'Sysmon service is stopped or its event channel is disabled; recorded events do not establish active capture.'}
         $cursor=0L;$time='';$cursorPath=Join-Path $Root 'state\sysmon-cursor.json'
         if(Test-Path -LiteralPath $cursorPath){$saved=Get-Content -LiteralPath $cursorPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop;$cursor=[long]$saved.RecordId;$time=[string]$saved.TimeCreated}
         $batch=Get-SentinelEventBatch -LogName 'Microsoft-Windows-Sysmon/Operational' -Cursor $cursor -CursorTime $time -Ids @(1,3,4,16,19,20,21,22,25,255) -BatchSize 1000
+        $sourceSeconds=$timer.Elapsed.TotalSeconds;$timer.Restart()
         $queue=Get-SentinelSysmonQueueState $Root
+        $queueSeconds=$timer.Elapsed.TotalSeconds
         $source=@($batch.Events);$oldest=if($source.Count){[datetimeoffset]$source[0].TimeCreated}else{$null}
+        $beat=Get-Content -LiteralPath (Join-Path $Root 'state\sysmon-analysis-heartbeat.json') -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        # Source/queue probes can take seconds while the helper keeps writing.
+        # Compare its heartbeat against its read time, not the probe start.
+        $heartbeatCheckedAt=Get-SentinelSysmonClock
+        $timer.Restart()
+        $process=Get-SentinelSysmonAnalysisProcess ([int]$beat.ProcessId)
+        $processSeconds=$timer.Elapsed.TotalSeconds
+        $age=($heartbeatCheckedAt-[datetimeoffset]$beat.LastUpdated).TotalSeconds
+        if($beat.Version -ne $Config.Version -or $beat.Status -ne 'Running'){throw 'Analysis heartbeat version/status is incorrect.'}
+        if($age -lt -5 -or $age -gt 120){throw ('Analysis heartbeat time invalid. LastUpdated={0}; HeartbeatCheckedAt={1}; AgeSeconds={2:F3}; StaleSeconds=120.' -f $beat.LastUpdated,$heartbeatCheckedAt.ToString('o'),$age)}
+        if(-not (Test-SentinelSysmonAnalysisIdentity $Root $beat $process)){throw 'Analysis heartbeat PID does not identify the expected helper and installation root.'}
+        $at=Get-SentinelSysmonClock
         $sourceAge=if($oldest){($at-$oldest).TotalSeconds}else{0.0}
         $analysisAge=if($queue.OldestEventAt){($at-$queue.OldestEventAt).TotalSeconds}else{0.0}
-        $beat=Get-Content -LiteralPath (Join-Path $Root 'state\sysmon-analysis-heartbeat.json') -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-        $process=Get-SentinelSysmonAnalysisProcess ([int]$beat.ProcessId)
-        $age=($at-[datetimeoffset]$beat.LastUpdated).TotalSeconds
-        if($beat.Version -ne $Config.Version -or $beat.Status -ne 'Running' -or $age -lt -5 -or $age -gt 120 -or -not (Test-SentinelSysmonAnalysisIdentity $Root $beat $process)){throw 'Analysis heartbeat/process identity is unavailable, stale or incorrect.'}
         if($sourceAge -lt -5 -or $analysisAge -lt -5){throw 'Source/queue event time is unexpectedly in the future.'}
         $status=if($batch.Reset){'Discontinuity'}elseif($sourceAge -gt 120 -or $analysisAge -gt 120){'Delayed'}else{'Healthy'}
         [pscustomobject]@{CheckedAt=$at.ToString('o');Status=$status;CursorRecordId=$cursor;SourcePendingEvents=$source.Count;SourceCountIsLowerBound=($source.Count -eq 1000);SourceOldestEventAt=$(if($oldest){$oldest.ToString('o')}else{$null});SourceOldestWaitSeconds=$sourceAge;AnalysisPendingEvents=$queue.PendingEvents;AnalysisBytes=$queue.Bytes;AnalysisOldestEventAt=$(if($queue.OldestEventAt){$queue.OldestEventAt.ToString('o')}else{$null});AnalysisOldestWaitSeconds=$analysisAge;AnalysisProcessId=[int]$beat.ProcessId;IngestionEventsPerSecond=(Get-SentinelRecentBatchRate $Root 'ingestion');AnalysisEventsPerSecond=(Get-SentinelRecentBatchRate $Root 'analysis');Error=$null}
     }catch{
+        $at=Get-SentinelSysmonClock
         [pscustomobject]@{CheckedAt=$at.ToString('o');Status='Unverified';CursorRecordId=$null;SourcePendingEvents=$null;SourceCountIsLowerBound=$null;SourceOldestEventAt=$null;SourceOldestWaitSeconds=$null;AnalysisPendingEvents=$null;AnalysisBytes=$null;AnalysisOldestEventAt=$null;AnalysisOldestWaitSeconds=$null;AnalysisProcessId=$null;Error=$_.Exception.Message}
     }
+    $result | ForEach-Object {
+        $_ | Add-Member NoteProperty ProbeStartedAt ($started.ToString('o'))
+        $_ | Add-Member NoteProperty HeartbeatCheckedAt $(if($heartbeatCheckedAt){$heartbeatCheckedAt.ToString('o')}else{$null})
+        $_ | Add-Member NoteProperty SourceProbeSeconds $sourceSeconds
+        $_ | Add-Member NoteProperty QueueProbeSeconds $queueSeconds
+        $_ | Add-Member NoteProperty ProcessProbeSeconds $processSeconds
+        $_
+    }
 }
+
+function Get-SentinelSysmonClock {return [datetimeoffset]::Now}
 
 function Get-SentinelSysmonSourceState {
     $services=@(Get-Service -Name Sysmon,Sysmon64 -ErrorAction SilentlyContinue | Where-Object Status -eq Running)

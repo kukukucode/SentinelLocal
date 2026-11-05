@@ -132,6 +132,31 @@ Test 'Healthy heartbeat does not conceal delayed events while quiet sources rema
     $script:AnalysisProcess.CreationDate=[datetime]::Now.AddMinutes(1);$script:Batch=[pscustomobject]@{Reset=$false;Events=@()}
     Assert ((Get-SentinelSysmonBacklog $root $config).Status -eq 'Unverified') 'Reused analysis PID was accepted.'
 }
+Test 'A heartbeat refreshed during slow probes uses its read time without accepting future stale or reused identities' {
+    $root=Fixture 'probe-clock';$script:ProbeClock=[datetimeoffset]::Now
+    $initial=$script:ProbeClock;$beatPath=Join-Path $root 'state\sysmon-analysis-heartbeat.json'
+    $script:BeatOffset=-1;$script:QueueOffset=-1
+    function Get-SentinelSysmonClock{return $script:ProbeClock}
+    function Get-SentinelEventBatch{
+        $script:ProbeClock=$script:ProbeClock.AddSeconds(20)
+        Write-SentinelAtomicJson $beatPath @{Version=$config.Version;Status='Running';ProcessId=99;LastUpdated=$script:ProbeClock.AddSeconds($script:BeatOffset).ToString('o')}
+        [pscustomobject]@{Reset=$false;Events=@()}
+    }
+    function Get-SentinelSysmonQueueState{[pscustomobject]@{PendingEvents=1;Bytes=100;OldestEventAt=$script:ProbeClock.AddSeconds($script:QueueOffset)}}
+    $script:AnalysisProcess=[pscustomobject]@{ProcessId=99;ExecutablePath=(Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe');CommandLine=('-File "'+(Join-Path $root 'Watcher.ps1')+'" -Root "'+$root+'" -AnalysisOnly');CreationDate=$initial.AddMinutes(-1).LocalDateTime}
+    $state=Get-SentinelSysmonBacklog $root $config
+    Assert ($state.Status -eq 'Healthy' -and [datetimeoffset]$state.HeartbeatCheckedAt -eq $initial.AddSeconds(20) -and [datetimeoffset]$state.ProbeStartedAt -eq $initial -and $state.AnalysisOldestWaitSeconds -eq 1) 'Slow probe made a refreshed heartbeat or newly queued event appear future-dated.'
+    $script:BeatOffset=30;$state=Get-SentinelSysmonBacklog $root $config
+    Assert ($state.Status -eq 'Unverified' -and $state.Error -like '*AgeSeconds=-30*' -and $null -eq $state.SourcePendingEvents) 'A genuinely future heartbeat passed.'
+    $script:BeatOffset=-121;$state=Get-SentinelSysmonBacklog $root $config
+    Assert ($state.Status -eq 'Unverified' -and $state.Error -like '*AgeSeconds=121*') 'A genuinely stale heartbeat passed.'
+    $script:BeatOffset=-1;$script:AnalysisProcess.CreationDate=$script:ProbeClock.AddMinutes(10).LocalDateTime
+    Assert ((Get-SentinelSysmonBacklog $root $config).Status -eq 'Unverified') 'PID reuse passed with a fresh clock.'
+    $script:AnalysisProcess.CreationDate=$initial.AddMinutes(-1).LocalDateTime;$script:QueueOffset=30
+    Assert ((Get-SentinelSysmonBacklog $root $config).Status -eq 'Unverified') 'A genuinely future source event passed.'
+    $script:QueueOffset=-300;$state=Get-SentinelSysmonBacklog $root $config
+    Assert ($state.Status -eq 'Delayed' -and $state.AnalysisOldestWaitSeconds -eq 300) 'A real backlog became healthy after fixing the clock comparison.'
+}
 Test 'Signature reuse is bound to locked actual bytes and expires even for an unchanged path' {
     $path=Join-Path $ScratchRoot 'signature.fixture';[IO.File]::WriteAllText($path,'AAAA');$mtime=(Get-Item $path).LastWriteTimeUtc
     $script:SignatureCalls=0;$script:SignatureLockObserved=$false;$script:SentinelSignatureCache=@{}

@@ -1,4 +1,5 @@
 ﻿Unreleased - ingestion and log reliability (Windows, 2026-10-16)
+- Compare analysis heartbeat freshness with its read time after slow source/queue probes; retain strict future/stale/PID checks and record probe timings instead of falsely treating a fresh heartbeat as future-dated.
 - Seal active and legacy JSONL during runtime retention instead of parsing/rebuilding history under shared writer locks; retain original bytes and expose verified historical oversize segments without exempting aggregate quota.
 - Separate fast Sysmon batch persistence from durable deferred scoring in an owned, restartable analysis process; retain observed hashes, ordered reset controls and retryable work across failures.
 - Report source and analysis backlog, oldest wait, bounded pending count and recent batch rates separately from component heartbeat; warn/recover and gate measurement on timely observation.

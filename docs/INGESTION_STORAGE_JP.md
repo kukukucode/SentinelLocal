@@ -25,6 +25,8 @@ Watcherは`Watcher.ps1 -AnalysisOnly`を別プロセスとして起動します�
 | 項目 | 意味 |
 | --- | --- |
 | CheckedAt / CursorRecordId | 調査時刻と保存済みソース位置 |
+| ProbeStartedAt / HeartbeatCheckedAt | 採取開始時刻と評価Heartbeatを読み取った時刻。鮮度・未来時刻の判定は読み取り時刻を使う |
+| SourceProbeSeconds / QueueProbeSeconds / ProcessProbeSeconds | ソース取得、評価待ち集計、評価プロセス照合にかかった秒数。未完了の段階はnull |
 | SourcePendingEvents | 対象イベントの取得待ち件数。1,000件取得時は下限値 |
 | SourceCountIsLowerBound | 件数が下限値かどうか。記録番号の差は使わない |
 | SourceOldestWaitSeconds | 最古の対象未取得イベントの待ち時間 |
@@ -33,6 +35,8 @@ Watcherは`Watcher.ps1 -AnalysisOnly`を別プロセスとして起動します�
 | IngestionEventsPerSecond / AnalysisEventsPerSecond | 直近バッチの処理速度。120秒以上古い・取得不能ならnull |
 
 未処理が存在して待ち時間が120秒を超えると`Delayed`、ログ消去などの不連続は`Discontinuity`、アクセス不能・評価プロセス不明・古いHeartbeatなどは`Unverified`です。取得不能を0件と表示しません。対象未処理がなければ、最後のイベントが古くても静かな正常状態です。
+
+ソースやキューの調査に時間がかかる間もHeartbeatは更新されます。採取開始時刻を使うと正常な更新が未来に見えるため、評価Heartbeatの鮮度はそのファイルを読み取った時刻で判定します。本当に未来（5秒超）・古い（120秒超）Heartbeat、PID再利用、実際の滞留を拒否する条件は変えません。待ち時間は調査終了時刻で算出し、遅い調査を隠さず開始・読み取り・終了時刻と段階別時間を残します。
 
 IntegrityMonitorは異常をHIGHで記録し、同じ状態の通知を5分単位で抑えます。正常に戻ったら`SysmonBacklogRecovered`を記録します。警告の保存に失敗した場合は通知済みとして抑制しません。Heartbeatが正常でも`Delayed`等なら計測前の診断は合格しません。診断合格は検知性能の合格ではありません。
 
