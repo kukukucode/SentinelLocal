@@ -1,4 +1,5 @@
 ﻿Unreleased - ingestion and log reliability (Windows, 2026-10-16)
+- Seal active and legacy JSONL during runtime retention instead of parsing/rebuilding history under shared writer locks; retain original bytes and expose verified historical oversize segments without exempting aggregate quota.
 - Separate fast Sysmon batch persistence from durable deferred scoring in an owned, restartable analysis process; retain observed hashes, ordered reset controls and retryable work across failures.
 - Report source and analysis backlog, oldest wait, bounded pending count and recent batch rates separately from component heartbeat; warn/recover and gate measurement on timely observation.
 - Rotate size-bounded JSONL into immutable hash-linked segments, verify checkpoints/indexes, recover interrupted rotation/retirement, and enforce a default 512 MiB aggregate JSONL quota.

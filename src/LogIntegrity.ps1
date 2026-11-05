@@ -476,10 +476,16 @@ function Repair-SentinelSegmentRetirement {
 }
 
 function Invoke-SentinelSegmentRetention {
-    param([string]$Path,[datetime]$Cutoff)
+    param([string]$Path,[datetime]$Cutoff,[switch]$SealActive)
     $budget=Enter-SentinelLogLock (Join-Path (Split-Path -Parent $Path) '__capacity');$mutex=$null
     try{
-        $mutex=Enter-SentinelLogLock $Path;$before=Get-SentinelLogCheckpoint $Path;$index=Read-SentinelSegmentIndex $Path $before
+        $mutex=Enter-SentinelLogLock $Path;$before=Get-SentinelLogCheckpoint $Path
+        if($before.PSObject.Properties['ArchiveOf']){throw 'Retire segments through their active stream.'}
+        if($SealActive -and $before.ByteLength -gt 0){
+            Move-SentinelLogSegment $Path $before
+            $before=Get-SentinelLogCheckpoint $Path
+        }
+        $index=Read-SentinelSegmentIndex $Path $before
         if(-not $index){return}
         $removed=@();$kept=@();$prefix=$true
         foreach($entry in @($index.Segments)){

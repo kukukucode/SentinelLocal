@@ -66,13 +66,34 @@ function Get-SentinelStorageStatus {
     if(Test-Path -LiteralPath $evidencePath) {
         foreach($file in @(Get-ChildItem -LiteralPath $evidencePath -File -Recurse -ErrorAction Stop)) { $evidenceBytes += $file.Length }
     }
-    $logOversize=@();$logBytes=0L;$limits=Get-SentinelLogLimits $Config
-    foreach($file in @(Get-ChildItem -LiteralPath (Join-Path $Root 'logs') -File -ErrorAction SilentlyContinue)) {
+    $logOversize=@();$preservedOversize=@();$logBytes=0L;$limits=Get-SentinelLogLimits $Config;$indexes=@{}
+    $budget=Enter-SentinelLogLock (Join-Path $Root 'logs\__capacity')
+    try{foreach($file in @(Get-ChildItem -LiteralPath (Join-Path $Root 'logs') -File -ErrorAction SilentlyContinue)) {
         if($file.Extension -eq '.jsonl'){$logBytes+=$file.Length}
-        if($Config.Resources -and $file.Length -gt ([long]$Config.Resources.MaxLogFileMB*1MB)) { $logOversize += $file.Name }
-    }
+        if($Config.Resources -and $file.Length -gt ([long]$Config.Resources.MaxLogFileMB*1MB)) {
+            if($file.Name -match '\.s\d{6}\.jsonl$' -and (Test-SentinelPreservedLogSegment $file.FullName $indexes)){$preservedOversize+=$file.Name}
+            else{$logOversize += $file.Name}
+        }
+    }}finally{$budget.ReleaseMutex();$budget.Dispose()}
     $healthy=$null -ne $free -and $free -ge ([long]$Config.Resources.MinFreeDiskMB*1MB) -and $evidenceBytes -lt ([long]$Config.Resources.MaxEvidenceMB*1MB) -and $logOversize.Count -eq 0 -and $logBytes -lt $limits.TotalBytes
-    return [pscustomobject]@{Healthy=[bool]$healthy;FreeBytes=$free;EvidenceBytes=$evidenceBytes;OversizeLogs=$logOversize;LogBytes=$logBytes;MaxTotalLogBytes=$limits.TotalBytes;MaxLogFileBytes=$limits.FileBytes;Error=$errorText}
+    return [pscustomobject]@{Healthy=[bool]$healthy;FreeBytes=$free;EvidenceBytes=$evidenceBytes;OversizeLogs=$logOversize;PreservedOversizeSegments=$preservedOversize;LogBytes=$logBytes;MaxTotalLogBytes=$limits.TotalBytes;MaxLogFileBytes=$limits.FileBytes;Error=$errorText}
+}
+
+function Test-SentinelPreservedLogSegment {
+    param([string]$Path,[hashtable]$Indexes)
+    try{
+        $checkpoint=Get-Content -LiteralPath (Get-SentinelChainPath $Path) -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $stream=[string]$checkpoint.ArchiveOf
+        if($stream -notmatch '^[A-Za-z0-9_.-]+\.jsonl$' -or $stream.Contains('..')){return $false}
+        $active=Join-Path (Split-Path -Parent $Path) $stream
+        if(-not $Indexes.ContainsKey($active)){
+            $state=Get-Content -LiteralPath (Get-SentinelChainPath $active) -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            if($state.PSObject.Properties['ArchiveOf']){return $false}
+            $Indexes[$active]=Read-SentinelSegmentIndex $active $state
+        }
+        $entries=@($Indexes[$active].Segments | Where-Object {$_.Name -ceq [IO.Path]::GetFileName($Path)})
+        return $entries.Count -eq 1 -and (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash -ceq [string]$entries[0].SHA256
+    }catch{return $false}
 }
 
 function Assert-SentinelStorage {

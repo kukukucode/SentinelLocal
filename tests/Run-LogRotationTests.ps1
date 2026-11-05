@@ -11,6 +11,58 @@ function Refused([scriptblock]$Body){$failed=$false;try{& $Body | Out-Null}catch
 function Fixture([string]$Name){Join-Path $ScratchRoot ($Name+'\logs\events.jsonl')}
 function Append([string]$Path,[int]$Number,[long]$Total=100000){Add-SentinelChainedRecord -Path $Path -Payload ([ordered]@{Type='Fixture';Number=$Number;Text=('x'*500);Timestamp=[datetimeoffset]::Now.ToString('o')}) -MaxFileBytes 1700 -MaxTotalBytes $Total}
 $realAtomic=${function:Write-SentinelAtomicJson}
+$realSnapshot=${function:Get-SentinelLogSnapshot}
+Test 'Runtime retention seals legacy bytes without parsing history under the writer lock' {
+    $path=Fixture 'runtime-legacy';$root=Split-Path (Split-Path $path)
+    $rows=@(1..1500 | ForEach-Object {[ordered]@{Type='OldFixture';Number=$_;Timestamp=[datetimeoffset]::Now.AddDays(-45).ToString('o');Text=('x'*200)}})
+    Add-SentinelChainedRecords $path $rows
+    $original=(Get-FileHash $path).Hash;$checkpoint=Get-SentinelLogCheckpoint $path;$script:HistoryScans=0;$script:ForbidHistoryScan=$true
+    function Get-SentinelLogSnapshot{param($Path) $script:HistoryScans++;if($script:ForbidHistoryScan){throw 'Historical parsing blocked a live writer.'};& $realSnapshot $Path}
+    try{Invoke-SentinelRetention $root 30}finally{$script:ForbidHistoryScan=$false}
+    Assert ($script:HistoryScans -eq 0 -and (Get-Item $path).Length -eq 0) 'Startup retention parsed history or left the old active stream.'
+    $index=Read-SentinelSegmentIndex $path (Get-SentinelLogCheckpoint $path)
+    $archive=Join-Path (Split-Path $path) $index.Segments[0].Name
+    Assert (@($index.Segments).Count -eq 1 -and (Get-FileHash $archive).Hash -eq $original -and $index.Segments[0].LineCount -eq 1500) 'Legacy migration lost or rewrote evidence.'
+    Add-SentinelChainedRecord $path ([ordered]@{Type='AfterMigration';Timestamp=[datetimeoffset]::Now.ToString('o')})
+    Assert ((Get-SentinelLogVerification $path).Valid -and @(Read-SentinelLogRows $path).Count -eq 1501) 'Writes or verification failed after sealing.'
+    Invoke-SentinelRetention $root 30
+    $count=@((Read-SentinelSegmentIndex $path (Get-SentinelLogCheckpoint $path)).Segments).Count
+    Invoke-SentinelRetention $root 30
+    Assert (@((Read-SentinelSegmentIndex $path (Get-SentinelLogCheckpoint $path)).Segments).Count -eq $count) 'An empty stream created repeated segments.'
+}
+Test 'Periodic sealing retires old prefixes and keeps new active data linked' {
+    $path=Fixture 'periodic-sealing'
+    Add-SentinelChainedRecord $path ([ordered]@{Type='Old';Timestamp=[datetimeoffset]::Now.AddDays(-45).ToString('o')})
+    function Get-SentinelLogUtcNow{return [datetimeoffset]::UtcNow.AddDays(-40)}
+    Invoke-SentinelSegmentRetention $path ([datetime]::Now.AddDays(-50)) -SealActive
+    $old=Read-SentinelSegmentIndex $path (Get-SentinelLogCheckpoint $path)
+    Add-SentinelChainedRecord $path ([ordered]@{Type='New';Timestamp=[datetimeoffset]::Now.ToString('o')})
+    function Get-SentinelLogUtcNow{return [datetimeoffset]::UtcNow}
+    Invoke-SentinelSegmentRetention $path ([datetime]::Now.AddDays(-30)) -SealActive
+    $index=Read-SentinelSegmentIndex $path (Get-SentinelLogCheckpoint $path) -Deep
+    Assert ($index.RetiredSequence -eq $old.Segments[0].Sequence -and @($index.Segments).Count -eq 1 -and @(Read-SentinelLogRows $path).Count -eq 1 -and (Get-SentinelLogVerification $path).Valid) 'Periodic retention removed new data or broke the retained anchor.'
+}
+Test 'An already oversized legacy stream stays visible and intact after verified sealing' {
+    $path=Fixture 'legacy-oversize';$root=Split-Path (Split-Path $path)
+    $config=Get-Content (Join-Path $repo 'config\Config.json') -Raw | ConvertFrom-Json;$config.Resources.MaxLogFileMB=1
+    $rows=@(1..1600 | ForEach-Object {[ordered]@{Type='Legacy';Number=$_;Text=('x'*500);Timestamp=[datetimeoffset]::Now.ToString('o')}})
+    Add-SentinelChainedRecords $path $rows
+    $hash=(Get-FileHash $path).Hash;$length=(Get-Item $path).Length
+    Assert ((Get-SentinelStorageStatus $root $config).OversizeLogs.Count -eq 1) 'Oversized active stream was hidden.'
+    Invoke-SentinelRetention $root 30
+    $state=Get-SentinelStorageStatus $root $config
+    Assert ($state.Healthy -and $state.OversizeLogs.Count -eq 0 -and $state.PreservedOversizeSegments.Count -eq 1 -and $state.LogBytes -eq $length) 'Verified historical oversize was lost or confused with an active oversize.'
+    $archive=Join-Path (Split-Path $path) $state.PreservedOversizeSegments[0]
+    Assert ((Get-FileHash $archive).Hash -eq $hash -and (Get-SentinelLogVerification $path).Valid) 'Migration truncated or modified the legacy bytes.'
+    $config.Resources.MaxTotalLogMB=1
+    Assert (-not (Get-SentinelStorageStatus $root $config).Healthy) 'Archived bytes bypassed the total quota.'
+    Assert (-not (Write-SentinelJsonLine $path ([ordered]@{Type='MustNotFit'}))) 'Append bypassed aggregate quota.'
+    Assert ((Get-FileHash $archive).Hash -eq $hash) 'Capacity pressure deleted legacy evidence.'
+    $config.Resources.MaxTotalLogMB=512
+    $bytes=[IO.File]::ReadAllBytes($archive);$bytes[50]=$bytes[50] -bxor 1;[IO.File]::WriteAllBytes($archive,$bytes)
+    $state=Get-SentinelStorageStatus $root $config
+    Assert (-not $state.Healthy -and $state.PreservedOversizeSegments.Count -eq 0 -and $state.OversizeLogs.Count -eq 1) 'Modified archive received a capacity exemption.'
+}
 Test 'Capacity rotation preserves all records and links immutable segments to the active checkpoint' {
     $path=Fixture 'normal';foreach($i in 1..8){Append $path $i}
     $checkpoint=Get-SentinelLogCheckpoint $path;$index=Read-SentinelSegmentIndex $path $checkpoint -Deep
@@ -78,7 +130,7 @@ Test 'Concurrent rotation and legacy retention entry point preserve every new re
     $children=@()
     try{
         foreach($role in @('Writer','Writer','Retention')){
-            $id=$children.Count;$command="& '{0}' -PackageRoot '{1}' -ScratchRoot '{2}' -Role '{3}' -WriterId {4} -MaxSegmentBytes 1700" -f (Join-Path $PSScriptRoot 'ConcurrentLogProbe.ps1').Replace("'","''"),$repo.Replace("'","''"),$root.Replace("'","''"),$role,$id
+            $id=$children.Count;$command="& '{0}' -PackageRoot '{1}' -ScratchRoot '{2}' -Role '{3}' -WriterId {4} -MaxSegmentBytes 1700 -SegmentRetention" -f (Join-Path $PSScriptRoot 'ConcurrentLogProbe.ps1').Replace("'","''"),$repo.Replace("'","''"),$root.Replace("'","''"),$role,$id
             $info=[Diagnostics.ProcessStartInfo]::new();$info.FileName=Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe';$info.Arguments='-NoProfile -ExecutionPolicy Bypass -EncodedCommand '+[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command));$info.UseShellExecute=$false;$info.CreateNoWindow=$true
             $children+=@([Diagnostics.Process]::Start($info))
         }

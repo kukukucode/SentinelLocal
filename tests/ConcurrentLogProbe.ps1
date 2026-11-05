@@ -1,4 +1,4 @@
-﻿param([string]$PackageRoot,[string]$ScratchRoot,[ValidateSet('Writer','Retention')][string]$Role,[int]$WriterId,[long]$MaxSegmentBytes=0)
+﻿param([string]$PackageRoot,[string]$ScratchRoot,[ValidateSet('Writer','Retention')][string]$Role,[int]$WriterId,[long]$MaxSegmentBytes=0,[switch]$SegmentRetention)
 $ErrorActionPreference='Stop'
 . (Join-Path $PackageRoot 'src\Common.ps1')
 try {
@@ -8,7 +8,7 @@ try {
             if ($Role -eq 'Writer') {
                 if($MaxSegmentBytes -gt 0){Add-SentinelChainedRecord $path ([ordered]@{Type='Probe';Writer=$WriterId;Number=$iteration;Timestamp=[datetimeoffset]::Now.ToString('o')}) -MaxFileBytes $MaxSegmentBytes -MaxTotalBytes 1000000}
                 elseif (-not (Write-SentinelJsonLine -Path $path -Data ([ordered]@{Type='Probe';Writer=$WriterId;Number=$iteration}))) { throw 'Concurrent append failed' }
-            } else { Invoke-SentinelJsonRetention -Path $path -Cutoff (Get-Date).AddDays(-30) }
+            } elseif($SegmentRetention) { Invoke-SentinelSegmentRetention -Path $path -Cutoff (Get-Date).AddDays(-30) -SealActive } else { Invoke-SentinelJsonRetention -Path $path -Cutoff (Get-Date).AddDays(-30) }
         }
     }
     exit 0
