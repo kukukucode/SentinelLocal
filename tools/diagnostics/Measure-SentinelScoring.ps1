@@ -58,8 +58,8 @@ foreach($event in $selected){
     $data=@{};foreach($node in $document.SelectNodes("//*[local-name()='EventData']/*[local-name()='Data']")){$data[[string]$node.GetAttribute('Name')]=[string]$node.InnerText}
     $process=ConvertFrom-SentinelSysmonProcess $data
     foreach($pass in 1..2){
-        $details=New-SentinelScoringTimings;$phase=[Diagnostics.Stopwatch]::StartNew();$score=Get-ProcessScore $process -Timings $details
-        $row=[pscustomobject]@{RecordId=[long]$event.RecordId;EventTime=[string]$event.TimeCreated;Image=[IO.Path]::GetFileName([string]$process.ExecutablePath);PathSHA256=(Get-SentinelStringHash ([string]$process.ExecutablePath));Pass=$pass;Seconds=$phase.Elapsed.TotalSeconds;Score=[int]$score.Score;ScoringDetails=$details}
+        $details=New-SentinelScoringTimings;$phase=[Diagnostics.Stopwatch]::StartNew();$score=Get-ProcessScore $process -Timings $details -RecordedIdentity
+        $row=[pscustomobject]@{RecordId=[long]$event.RecordId;EventTime=[string]$event.TimeCreated;Image=[IO.Path]::GetFileName([string]$process.ExecutablePath);PathSHA256=(Get-SentinelStringHash ([string]$process.ExecutablePath));Pass=$pass;Seconds=$phase.Elapsed.TotalSeconds;Score=[int]$score.Score;ScoringDetails=$details;SignatureAssessment=$score.SignatureAssessment}
         $rows.Add($row)
         Write-Host ('Scoring sample: '+($row | ConvertTo-Json -Depth 5 -Compress))
     }

@@ -1,4 +1,5 @@
 ﻿Unreleased - ingestion and log reliability (Windows, 2026-10-16)
+- Reuse byte-verified signatures for trusted recorded Sysmon content by path and observed SHA256 for at most 15 seconds, with explicit historical assessment/current-hash-check metadata; current-file and response validation still hash actual bytes, and mismatched source hashes cannot prime reuse.
 - Restrict original-filename resource reads to the ProgramData rename rule; retain signature checks and byte-bound reuse, export scoring subphase timings, and add a read-only pending-event scoring diagnostic without queue acknowledgements.
 - Keep analysis payloads immutable and hash-bind small progress sidecars; amortize durable checkpoints over up to 30 events with conservative replay, use free queue slots for acquisition, and measure analysis preparation/scoring/response/checkpoint phases.
 - Compare analysis heartbeat freshness with its read time after slow source/queue probes; retain strict future/stale/PID checks and record probe timings instead of falsely treating a fresh heartbeat as future-dated.

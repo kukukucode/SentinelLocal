@@ -217,7 +217,7 @@ function Get-FileSignatureStatus {
 }
 
 function Get-ProcessScore {
-    param($ProcessInfo,[hashtable]$Timings)
+    param($ProcessInfo,[hashtable]$Timings,[switch]$RecordedIdentity)
     $phase=if($Timings){[Diagnostics.Stopwatch]::StartNew()}else{$null}
     try{$internal=Test-SentinelInternalResponse -Root $Root -ProcessInfo $ProcessInfo}
     finally{if($Timings){$Timings.InternalResponseSeconds+=$phase.Elapsed.TotalSeconds}}
@@ -247,9 +247,20 @@ function Get-ProcessScore {
         }
     }
 
-    $signatureStatus = Get-FileSignatureStatus $path -Timings $Timings
+    $signatureAssessment=$null
+    if($RecordedIdentity -and (Test-SentinelRecordedSignatureIdentity $ProcessInfo)){
+        try{
+            $signatureAssessment=Get-SentinelRecordedSignatureAssessment $ProcessInfo -Timings $Timings
+            $signatureStatus=$signatureAssessment.ObservedStatus
+        }catch{
+            Write-SentinelError -Root $Root -Component 'Watcher' -Operation 'Assess recorded content signature' -Exception $_.Exception -Context @{Path=$path} -Severity MEDIUM
+            $signatureStatus='Unavailable'
+        }
+    }else{$signatureStatus = Get-FileSignatureStatus $path -Timings $Timings}
     if ($signatureStatus -and [string]$signatureStatus -ne "Valid") {
-        $score+=15; $reasons.Add("Executable is not validly signed")
+        $score+=15
+        if($signatureStatus -eq 'ObservedHashMismatch'){$reasons.Add('Recorded content hash could not be verified')}
+        else{$reasons.Add("Executable is not validly signed")}
     }
 
     try {
@@ -265,7 +276,7 @@ function Get-ProcessScore {
         Write-SentinelError -Root $Root -Component "Watcher" -Operation "Read original filename" -Exception $_.Exception -Context @{Path=$path} -Severity "MEDIUM"
     }
 
-    return [pscustomobject]@{Score=$score;Reasons=@($reasons)}
+    return [pscustomobject]@{Score=$score;Reasons=@($reasons);SignatureAssessment=$signatureAssessment}
 }
 
 function Get-ImmediateNetworkSnapshot {
@@ -962,7 +973,7 @@ if($AnalysisOnly){
     while($true){
         Write-AnalysisHeartbeat
         try{
-            $worked=Invoke-SentinelPendingSysmonAnalysis -Root $Root -Config $config -ScoreProcess {param($observed,$scoreTimings) Get-ProcessScore $observed -Timings $scoreTimings} -QueueResponse {
+            $worked=Invoke-SentinelPendingSysmonAnalysis -Root $Root -Config $config -ScoreProcess {param($observed,$scoreTimings) Get-ProcessScore $observed -Timings $scoreTimings -RecordedIdentity} -QueueResponse {
                 param($path,$processIdValue,$score,$observed)
                 Queue-SentinelResponse -FilePath $path -ProcessIdValue $processIdValue -Score $score.Score -Reasons $score.Reasons -Source Sysmon -ObservedProcess $observed
             } -Progress {param($completed) Write-AnalysisHeartbeat}
