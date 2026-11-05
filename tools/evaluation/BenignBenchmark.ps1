@@ -123,7 +123,7 @@ function Invoke-SentinelBenignBenchmark([string]$Root,[string]$OutputDirectory,[
             if(([datetimeoffset]::Now-$lastProgress).TotalSeconds -ge 15){Write-Host ('Observation tail: '+[math]::Max(0,[math]::Ceiling(($deadline-[datetimeoffset]::Now).TotalSeconds))+' seconds remaining; health samples='+$samples.Count);$lastProgress=[datetimeoffset]::Now}
         }
     }catch{$errors+=@($_.Exception.Message)}
-    Write-Host 'Observation window finished; collecting the final health sample.'
+    Write-Host 'Observation phase ended; collecting the final health sample.'
     $samples+=@(Get-SentinelBenchmarkHealth $rootPath $config)
     Write-SentinelAtomicJson (Join-Path $output 'health-samples.json') $samples
     Write-Host 'Checking post-observation baseline; historical log verification may take several minutes.'
