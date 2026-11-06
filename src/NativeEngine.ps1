@@ -4,7 +4,11 @@ function Initialize-SentinelNative {
     if($script:SentinelNativeLoaded){return}
     if(-not [Environment]::Is64BitProcess){throw 'The native engine requires 64-bit Windows PowerShell.'}
     $directory=$script:SentinelNativeCodeDirectory
-    if(-not (Test-Path -LiteralPath (Join-Path $directory 'sentinel_engine.dll'))){$directory=Join-Path (Split-Path -Parent $directory) 'native\bin'}
+    if(-not (Test-Path -LiteralPath (Join-Path $directory 'sentinel_engine.dll'))){
+        $sourceRoot=Split-Path -Parent $directory
+        if((Split-Path -Leaf $directory) -cne 'src' -or -not (Test-Path -LiteralPath (Join-Path $sourceRoot 'native\Cargo.toml') -PathType Leaf) -or -not (Test-Path -LiteralPath (Join-Path $sourceRoot 'config\Config.json') -PathType Leaf)){throw 'Required native DLL is missing; adjacent directories are not trusted.'}
+        $directory=Join-Path $sourceRoot 'native\bin'
+    }
     $binary=Join-Path $directory 'sentinel_engine.dll';$metadata=Join-Path $directory 'sentinel-engine.json'
     Assert-SentinelLogPath $binary;Assert-SentinelLogPath $metadata
     $metaLock=[IO.File]::Open($metadata,'Open','Read','Read');$dllLock=$null
@@ -87,7 +91,7 @@ function Get-SentinelNativeLogScan {
     }
     try{$result=Invoke-SentinelNative $request}
     catch{
-        if($_.Exception.Message -notmatch 'Too many compatibility records|Captured/compatibility data exceeds|Log record exceeds'){throw}
+        if($_.Exception.Message -notmatch 'Too many compatibility records|Captured/compatibility data exceeds|Log record exceeds|Reply exceeds serialization bound'){throw}
         # Representation/size limits use the original full verifier, never an
         # unchecked result. Reparse refusals and actual hash failures stay fatal.
         $result=Get-SentinelLegacyLogSnapshot $Path

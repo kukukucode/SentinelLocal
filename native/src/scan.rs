@@ -128,8 +128,14 @@ pub fn scan(v: &Value) -> Result<Value, String> {
         bytes += n as u64;
         let line = buffer.strip_suffix(b"\n").unwrap_or(&buffer);
         let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if lines > 0 && line.starts_with(&[0xef, 0xbb, 0xbf]) {
+            return Err("Unexpected BOM inside log stream".into());
+        }
         let row = canonical::parse(line)?;
         let prev = text(&row, "_ChainPrev").ok_or("Missing previous hash")?;
+        if prev.is_empty() {
+            return Err("Missing previous hash".into());
+        }
         let recorded = text(&row, "_ChainHash").ok_or("Missing record hash")?;
         if !canonical::eq(&row, "_ChainAlg", "SHA256")
             || recorded.len() != 64

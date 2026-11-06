@@ -14,6 +14,19 @@ function ChainFile([string]$Path,[object[]]$Rows){
     foreach($row in $Rows){$payload=$row | ConvertTo-Json -Compress -Depth 14;$hash=Get-SentinelStringHash ($last+"`n"+$payload);$record=[ordered]@{};foreach($key in $row.Keys){$record[$key]=$row[$key]};$record._ChainAlg='SHA256';$record._ChainPrev=$last;$record._ChainHash=$hash;$lines.Add(($record | ConvertTo-Json -Compress -Depth 14));$last=$hash}
     [IO.File]::WriteAllLines($Path,$lines,[Text.UTF8Encoding]::new($false))
 }
+Test 'Missing flat DLL cannot redirect loading into an adjacent native directory' {
+    $root=Fixture 'loader-flat';$beforeDirectory=$script:SentinelNativeCodeDirectory;$beforeLoaded=$script:SentinelNativeLoaded
+    try{$script:SentinelNativeCodeDirectory=$root;$script:SentinelNativeLoaded=$false;Refused {Initialize-SentinelNative}}
+    finally{$script:SentinelNativeCodeDirectory=$beforeDirectory;$script:SentinelNativeLoaded=$beforeLoaded}
+}
+Test 'DLL bytes must match pinned metadata before execution' {
+    $root=Fixture 'loader-hash';Copy-Item (Join-Path $repo 'native\bin\sentinel_engine.dll') $root
+    $info=Get-Content (Join-Path $repo 'native\bin\sentinel-engine.json') -Raw | ConvertFrom-Json;$info.SHA256='0'*64
+    Write-SentinelAtomicJson (Join-Path $root 'sentinel-engine.json') $info
+    $beforeDirectory=$script:SentinelNativeCodeDirectory;$beforeLoaded=$script:SentinelNativeLoaded
+    try{$script:SentinelNativeCodeDirectory=$root;$script:SentinelNativeLoaded=$false;Refused {Initialize-SentinelNative}}
+    finally{$script:SentinelNativeCodeDirectory=$beforeDirectory;$script:SentinelNativeLoaded=$beforeLoaded}
+}
 Test 'PS5 canonical parity includes control characters Unicode HTML and compatibility numbers' {
     $root=Fixture 'canonical';$path=Join-Path $root 'process-events.jsonl'
     $text='日本語😀 <>&'''+(-join (0..31 | ForEach-Object {[char]$_}))+[char]0x85+[char]0x2028+[char]0x2029
@@ -26,6 +39,14 @@ Test 'Cached proofs rehash actual bytes and reject same-length tampering' {
     $root=Fixture 'tampering';$path=Join-Path $root 'alerts.jsonl';ChainFile $path @([ordered]@{Text='AAA'})
     [void](Get-SentinelNativeLogScan $path);$stamp=(Get-Item $path).LastWriteTimeUtc
     $bytes=[IO.File]::ReadAllText($path).Replace('AAA','BBB');[IO.File]::WriteAllText($path,$bytes,[Text.UTF8Encoding]::new($false));(Get-Item $path).LastWriteTimeUtc=$stamp
+    Refused {Get-SentinelNativeLogScan $path}
+}
+Test 'Interior BOM and empty chain predecessor cannot establish a valid snapshot' {
+    $root=Fixture 'invalid-boundary';$path=Join-Path $root 'alerts.jsonl';ChainFile $path @([ordered]@{Text='A'},[ordered]@{Text='B'})
+    $lines=[IO.File]::ReadAllLines($path);$lines[1]=[char]0xFEFF+$lines[1];[IO.File]::WriteAllLines($path,$lines,[Text.UTF8Encoding]::new($false))
+    Refused {Get-SentinelNativeLogScan $path}
+    $payload='{"Text":"A"}';$hash=Get-SentinelStringHash ("`n"+$payload)
+    [IO.File]::WriteAllText($path,('{"Text":"A","_ChainAlg":"SHA256","_ChainPrev":"","_ChainHash":"'+$hash+'"}'),[Text.UTF8Encoding]::new($false))
     Refused {Get-SentinelNativeLogScan $path}
 }
 Test 'Streaming capture matches full rows without trusting PID alone and reports synthetic timing' {
