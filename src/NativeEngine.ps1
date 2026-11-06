@@ -110,7 +110,11 @@ function Get-SentinelNativeLogScan {
     $result | Add-Member NoteProperty PowerShellCompatibilityCount @($result.CompatibilityRows).Count
     $result.CompatibilityRows=@();$result.CanonicalValidationComplete=$true
     if(-not $script:SentinelNativeScanCache){$script:SentinelNativeScanCache=@{}}
-    if($script:SentinelNativeScanCache.Count -ge 256){$script:SentinelNativeScanCache.Clear()}
+    # Bound retained row payloads as well as entry count. Clearing affects
+    # performance only; future callers must verify the bytes again.
+    if(-not $script:SentinelScanRetainedBytes){$script:SentinelScanRetainedBytes=0L}
+    if($script:SentinelNativeScanCache.Count -ge 256 -or $script:SentinelScanRetainedBytes+[long]$result.RetainedBytes -gt 16MB){$script:SentinelNativeScanCache.Clear();$script:SentinelScanDigestCache=@{};$script:SentinelScanRetainedBytes=0L}
+    $script:SentinelScanRetainedBytes+=[long]$result.RetainedBytes
     $script:SentinelNativeScanCache[[IO.Path]::GetFullPath($Path)]=$result
     if(-not $script:SentinelScanDigestCache){$script:SentinelScanDigestCache=@{}}
     if($script:SentinelScanDigestCache.Count -ge 256){$script:SentinelScanDigestCache.Clear()}

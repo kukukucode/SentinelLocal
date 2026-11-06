@@ -36,12 +36,37 @@ fn relevant(row: &Value, kind: &str) -> bool {
     };
     relevant
 }
-fn capture(row: &Value, kind: &str, c: &Value) -> Result<bool, String> {
-    if c.is_null() || !relevant(row, kind) {
+struct Capture {
+    from: i128,
+    to: i128,
+    pids: HashSet<u64>,
+}
+impl Capture {
+    fn parse(c: &Value) -> Result<Option<Self>, String> {
+        if c.is_null() {
+            return Ok(None);
+        }
+        let from = canonical::ticks(c["start"].as_str().ok_or("Missing capture start")?)?;
+        let to = canonical::ticks(c["end"].as_str().ok_or("Missing capture end")?)?;
+        if from > to {
+            return Err("Invalid capture interval".into());
+        }
+        let pids = c["pids"]
+            .as_array()
+            .ok_or("Missing trial PIDs")?
+            .iter()
+            .map(|v| v.as_u64().ok_or("Invalid trial PID"))
+            .collect::<Result<HashSet<_>, _>>()?;
+        Ok(Some(Self { from, to, pids }))
+    }
+}
+fn capture(row: &Value, kind: &str, c: Option<&Capture>) -> Result<bool, String> {
+    let Some(c) = c else {
+        return Ok(false);
+    };
+    if !relevant(row, kind) {
         return Ok(false);
     }
-    let from = canonical::ticks(c["start"].as_str().ok_or("Missing capture start")?)?;
-    let to = canonical::ticks(c["end"].as_str().ok_or("Missing capture end")?)?;
     let time = canonical::ticks(
         text(
             row,
@@ -53,7 +78,7 @@ fn capture(row: &Value, kind: &str, c: &Value) -> Result<bool, String> {
         )
         .ok_or("Relevant record has no timestamp")?,
     )?;
-    if time < from || time > to {
+    if time < c.from || time > c.to {
         return Ok(false);
     }
     if kind == "process-events" {
@@ -61,11 +86,7 @@ fn capture(row: &Value, kind: &str, c: &Value) -> Result<bool, String> {
             .and_then(|p| field(p, "ProcessId"))
             .and_then(Value::as_u64)
             .ok_or("Invalid process identity")?;
-        return Ok(c["pids"]
-            .as_array()
-            .ok_or("Missing trial PIDs")?
-            .iter()
-            .any(|x| x.as_u64() == Some(pid)));
+        return Ok(c.pids.contains(&pid));
     }
     Ok(true)
 }
@@ -77,6 +98,7 @@ pub fn scan(v: &Value) -> Result<Value, String> {
         .and_then(|s| s.to_str())
         .ok_or("Invalid filename")?;
     let kind = name.split('.').next().unwrap_or("");
+    let capture_context = Capture::parse(&v["capture"])?;
     let mut hash = Sha256::new();
     let mut bytes = 0u64;
     let mut lines = 0u64;
@@ -169,7 +191,7 @@ pub fn scan(v: &Value) -> Result<Value, String> {
                 None => time_complete = false,
             }
         }
-        if capture(&row, kind, &v["capture"])? {
+        if capture(&row, kind, capture_context.as_ref())? {
             result_bytes += line.len();
             rows.push(row.clone());
         }
@@ -182,7 +204,7 @@ pub fn scan(v: &Value) -> Result<Value, String> {
         lines += 1;
     }
     Ok(
-        json!({"LineCount":lines,"ByteLength":bytes,"LastHash":last,"FirstPreviousHash":first,"SHA256":storage::hex(hash.finalize()),"Rows":rows,"CompatibilityRows":compatibility,"CanonicalValidationComplete":compatibility.is_empty(),"TimeIndexComplete":time_complete,"MinTimestampTicks":min_time.map(|x|x.to_string()),"MaxTimestampTicks":max_time.map(|x|x.to_string())}),
+        json!({"LineCount":lines,"ByteLength":bytes,"LastHash":last,"FirstPreviousHash":first,"SHA256":storage::hex(hash.finalize()),"Rows":rows,"CompatibilityRows":compatibility,"RetainedBytes":result_bytes,"CanonicalValidationComplete":compatibility.is_empty(),"TimeIndexComplete":time_complete,"MinTimestampTicks":min_time.map(|x|x.to_string()),"MaxTimestampTicks":max_time.map(|x|x.to_string())}),
     )
 }
 use std::io::Read;

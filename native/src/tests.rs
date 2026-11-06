@@ -21,7 +21,9 @@ impl Fixture {
         Self(path)
     }
     fn write(&self, name: &str, value: &Value) -> PathBuf {
-        let path = self.0.join(name);
+        let path = self
+            .0
+            .join(name.replace('/', std::path::MAIN_SEPARATOR_STR));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         storage::atomic(&path, value).unwrap();
         path
