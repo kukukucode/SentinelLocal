@@ -9,9 +9,9 @@ Microsoft Defenderを主防御エンジンとして利用する、軽量Host IDS
 
 **公開中の試験版: [v1.2.1-preview.1](https://github.com/kukukucode/SentinelLocal/releases/tag/v1.2.1-preview.1)**。Windows向けの配布ZIP、独立したBootstrap、SHA-256一覧をReleaseから取得できます。[構成ガイド](docs/REPOSITORY_JP.md)の「公開版と配布物」を先に確認してください。GitHubの自動生成Source code ZIPは導入用パッケージとは配置が異なります。
 
-**既知の制限:** 正常コマンド30試行でSysmon原本は30/30件、Sentinelへの120秒以内の保存は0/30件でした。取り込みの滞留とログ容量管理は[Issue #6〜#12](https://github.com/kukukucode/SentinelLocal/issues?q=is%3Aissue%20is%3Aopen)で追跡しています。実マルウェアの防御性能は未測定で、常用前の評価・改善が必要です。
+**既知の制限:** 旧測定の正常コマンド30試行ではSysmon原本は30/30件、Sentinelへの120秒以内の保存は0/30件でした。この結果を保持し、取り込みの滞留とログ容量管理を[Issue #6〜#12](https://github.com/kukukucode/SentinelLocal/issues?q=is%3Aissue%20is%3Aopen)で追跡しています。実マルウェアの防御性能は未測定で、常用前の評価・改善が必要です。
 
-開発中のソースでは、Sysmon取得と評価のプロセス分離、滞留の独立判定、検証可能なログ分割・総容量制限に対応しています。公開済みpreview.1には含まれず、修正後の実PC測定は未完了です。[変更内容と保持方針](docs/INGESTION_STORAGE_JP.md)を参照してください。
+開発中のソースでは、Sysmon取得と評価のプロセス分離、滞留の独立判定、検証可能なログ分割・総容量制限に対応しています。2026-11-06に開発コミット`f80d2f3`を単一Windows PCへ適用した新しい30試行では、120秒以内の保存30/30、保存遅延の中央値4.06秒・p95 10.83秒・最大11.57秒でした。公開済みpreview.1には含まれません。[実測の条件と制限](https://github.com/kukukucode/SentinelLocal/blob/bd53603d1a6ded8f78451d62e23888ae848c7bd8/docs/results/BENIGN_2026-11-06_JP.md)、[変更内容と保持方針](docs/INGESTION_STORAGE_JP.md)を参照してください。
 
 ## リポジトリ構成
 

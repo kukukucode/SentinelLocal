@@ -259,8 +259,9 @@ function Invoke-SentinelRetention {
         try {
             if ($ext -eq ".jsonl") {
                 if($path.Name -match '\.s\d{6}\.jsonl$'){continue}
-                if(Test-Path -LiteralPath ((Get-SentinelChainPath $path.FullName)+'.segments.json')){Invoke-SentinelSegmentRetention -Path $path.FullName -Cutoff $cutoff}
-                else{Invoke-SentinelJsonRetention -Path $path.FullName -Cutoff $cutoff}
+                # Seal bytes once; never parse/rewrite an entire legacy JSONL
+                # while holding the shared writer lock in the Watcher loop.
+                Invoke-SentinelSegmentRetention -Path $path.FullName -Cutoff $cutoff -SealActive
             }
             elseif ($path.Name -eq "events.log") {
                 $writer = [System.IO.StreamWriter]::new($tmp, $false, [System.Text.UTF8Encoding]::new($true))

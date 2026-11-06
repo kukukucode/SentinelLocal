@@ -1,10 +1,16 @@
 ﻿Unreleased - ingestion and log reliability (Windows, 2026-10-16)
+- Print the benchmark output folder immediately and report post-observation verification, snapshot, evidence-read and summary phases; clamp an elapsed observation countdown to zero without changing the observation deadline.
+- Reuse byte-verified signatures for trusted recorded Sysmon content by path and observed SHA256 for at most 15 seconds, with explicit historical assessment/current-hash-check metadata; current-file and response validation still hash actual bytes, and mismatched source hashes cannot prime reuse.
+- Restrict original-filename resource reads to the ProgramData rename rule; retain signature checks and byte-bound reuse, export scoring subphase timings, and add a read-only pending-event scoring diagnostic without queue acknowledgements.
+- Keep analysis payloads immutable and hash-bind small progress sidecars; amortize durable checkpoints over up to 30 events with conservative replay, use free queue slots for acquisition, and measure analysis preparation/scoring/response/checkpoint phases.
+- Compare analysis heartbeat freshness with its read time after slow source/queue probes; retain strict future/stale/PID checks and record probe timings instead of falsely treating a fresh heartbeat as future-dated.
+- Seal active and legacy JSONL during runtime retention instead of parsing/rebuilding history under shared writer locks; retain original bytes and expose verified historical oversize segments without exempting aggregate quota.
 - Separate fast Sysmon batch persistence from durable deferred scoring in an owned, restartable analysis process; retain observed hashes, ordered reset controls and retryable work across failures.
 - Report source and analysis backlog, oldest wait, bounded pending count and recent batch rates separately from component heartbeat; warn/recover and gate measurement on timely observation.
 - Rotate size-bounded JSONL into immutable hash-linked segments, verify checkpoints/indexes, recover interrupted rotation/retirement, and enforce a default 512 MiB aggregate JSONL quota.
 - Include all segments and index hashes in audit snapshots and evaluation readers. Readiness verifies copies after releasing production writer locks.
 - Add Windows PowerShell 5.1 failure/concurrency/helper-lifecycle regressions and exercise acquisition plus deferred evaluation in real Sysmon CI.
-- Preserve the original real-PC result (native 30/30, Sentinel within 120 seconds 0/30). Post-fix real-PC acceptance and malware efficacy remain unmeasured. This source change is not part of published preview.1.
+- Preserve the original real-PC result (native 30/30, Sentinel within 120 seconds 0/30). A new single-PC run of f80d2f3 captured 30/30 within 120 seconds, with persistence median/p95/max 4.064629/10.830643/11.568128 seconds and valid sampled observation. Record the scope and evidence hashes separately; malware efficacy remains unmeasured. This source change is not part of published preview.1.
 v1.2.1-preview.1 - Windows evaluation preview (2026-10-15)
 - Refresh public release guidance, provide the Windows flat package separately from its Bootstrap, and publish file checksums and source metadata. Runtime Version remains 1.2.1; this is a prerelease.
 - Preserve the original 30-trial result (native Sysmon 30/30, Sentinel persistence within 120 seconds 0/30); ingestion backlog and log rotation remain open in issues #6-#12. Malware efficacy remains unmeasured.

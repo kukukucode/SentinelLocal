@@ -81,6 +81,8 @@ function Invoke-SentinelBenignBenchmark([string]$Root,[string]$OutputDirectory,[
         while($ancestor){if((Test-Path $ancestor) -and ((Get-Item -LiteralPath $ancestor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Benchmark paths must not traverse reparse points.'};$parent=Split-Path -Parent $ancestor;if($parent -eq $ancestor){break};$ancestor=$parent}
     }
     New-Item -ItemType Directory -Path $output | Out-Null
+    Write-Host ('Measurement folder: '+$output)
+    Write-Host 'Checking measurement baseline; historical log verification may take several minutes.'
     try {$pre=Wait-SentinelObservationBaseline $rootPath}
     catch {$pre=[pscustomobject]@{ReadyForBenignTrials=$false;Environment=[pscustomobject]@{SysmonEnabled=$null};Checks=@([pscustomobject]@{Name='Readiness probe';State='Unverified';Value=$_.Exception.Message})}}
     Write-SentinelAtomicJson (Join-Path $output 'readiness-before.json') $pre
@@ -118,11 +120,13 @@ function Invoke-SentinelBenignBenchmark([string]$Root,[string]$OutputDirectory,[
         while([datetimeoffset]::Now -lt $deadline){
             if(([datetimeoffset]::Now-$lastSample).TotalSeconds -ge 5){$samples+=@(Get-SentinelBenchmarkHealth $rootPath $config);$lastSample=[datetimeoffset]::Now;Write-SentinelAtomicJson (Join-Path $output 'health-samples.json') $samples;if(-not $samples[-1].Healthy){throw 'Runtime health sampling failed.'}}
             Start-Sleep -Seconds 1
-            if(([datetimeoffset]::Now-$lastProgress).TotalSeconds -ge 15){Write-Host ('Observation tail: '+[math]::Ceiling(($deadline-[datetimeoffset]::Now).TotalSeconds)+' seconds remaining; health samples='+$samples.Count);$lastProgress=[datetimeoffset]::Now}
+            if(([datetimeoffset]::Now-$lastProgress).TotalSeconds -ge 15){Write-Host ('Observation tail: '+[math]::Max(0,[math]::Ceiling(($deadline-[datetimeoffset]::Now).TotalSeconds))+' seconds remaining; health samples='+$samples.Count);$lastProgress=[datetimeoffset]::Now}
         }
     }catch{$errors+=@($_.Exception.Message)}
+    Write-Host 'Observation phase ended; collecting the final health sample.'
     $samples+=@(Get-SentinelBenchmarkHealth $rootPath $config)
     Write-SentinelAtomicJson (Join-Path $output 'health-samples.json') $samples
+    Write-Host 'Checking post-observation baseline; historical log verification may take several minutes.'
     try {$post=Wait-SentinelObservationBaseline $rootPath}
     catch {$errors+=@($_.Exception.Message);$post=[pscustomobject]@{ReadyForBenignTrials=$false;Environment=[pscustomobject]@{ConfigSHA256=$null};Error=$_.Exception.Message}}
     Write-SentinelAtomicJson (Join-Path $output 'readiness-after.json') $post
@@ -135,15 +139,21 @@ function Invoke-SentinelBenignBenchmark([string]$Root,[string]$OutputDirectory,[
     $snapshot=$null;$records=@();$defenderStatus='Unverified';$native=@();$windowStart=$null;$windowEnd=$null
     if($trials.Count){$windowStart=[datetimeoffset]$trials[0].StartedAt;$windowEnd=[datetimeoffset]$trials[-1].ObservationEndedAt}
     try {
+        Write-Host 'Copying and verifying Sentinel log history; the trial commands will not be repeated.'
         $snapshot=Export-SentinelBenchmarkSnapshot $rootPath (Join-Path $output 'sentinel')
+        Write-Host 'Snapshot ready; verifying and reading process creation records.'
         $path=Join-Path $snapshot 'logs\process-events.jsonl'
         if(-not (Get-SentinelLogVerification $path).Valid){throw 'Process snapshot verification failed.'}
         $records=@(Read-SentinelLogRows $path)
+        Write-Host 'Reading Sysmon continuity evidence.'
         $source=@(Read-SentinelLogRows (Join-Path $snapshot 'logs\sysmon-events.jsonl'))
+        Write-Host 'Reading Sentinel alert history.'
         $alerts=@(Read-SentinelLogRows (Join-Path $snapshot 'logs\alerts.jsonl'))
+        Write-Host 'Reading Sentinel error history and checking the observation window.'
         $sourceErrors=@();$errorPath=Join-Path $snapshot 'logs\errors.jsonl'
         if(Test-Path $errorPath){$sourceErrors=@(Read-SentinelLogRows $errorPath)}
         if($windowStart){Assert-SentinelBenchmarkTelemetryWindow $source $alerts $sourceErrors $windowStart $windowEnd}
+        Write-Host 'Reading Defender evidence for the observation window.'
         [void](Get-EvaluationEventChannel 'Microsoft-Windows-Windows Defender/Operational')
         if($windowStart){
             try{$native=@(Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Windows Defender/Operational';StartTime=$windowStart.LocalDateTime;EndTime=$windowEnd.LocalDateTime} -MaxEvents 10001 -ErrorAction Stop)}catch{if($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*'){throw}}
@@ -152,6 +162,7 @@ function Invoke-SentinelBenignBenchmark([string]$Root,[string]$OutputDirectory,[
         $defender=@($native | Sort-Object RecordId | ForEach-Object {[pscustomobject]@{Id=$_.Id;RecordId=$_.RecordId;TimeCreated=$_.TimeCreated.ToUniversalTime().ToString('o');Data=(Get-SentinelEventData $_);Xml=$_.ToXml()}})
         Write-SentinelAtomicJson (Join-Path $output 'defender-events.json') $defender;$defenderStatus='ReadSucceeded'
     }catch{$errors+=@($_.Exception.Message)}
+    Write-Host 'Matching trial identities and writing the measurement summary.'
     $summary=Get-SentinelBenchmarkSummary $trials $records ($errors.Count -eq 0)
     $packet=[ordered]@{Schema=1;Kind='BenignBenchmarkPacket';CapturedAt=[datetimeoffset]::Now.ToString('o');Root=$rootPath;Environment=$pre.Environment;Plan=$plan;Trials=$trials;Snapshot=$snapshot;DefenderStatus=$defenderStatus;HealthSampleCount=$samples.Count;MaximumSampleGapSeconds=$maxGap;Errors=$errors;Capture=$summary;PerformanceMeasured=$false;ReviewRequired=$true;Scope='Capture fraction and ingestion timing for this fixed benign workload. Alert attribution must be reviewed separately; no malware efficacy or ATT&CK measurement.'}
     Write-SentinelAtomicJson (Join-Path $output 'benchmark.json') $packet

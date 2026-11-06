@@ -205,11 +205,11 @@ function Test-RandomishSegment {
 }
 
 function Get-FileSignatureStatus {
-    param([string]$Path)
+    param([string]$Path,[hashtable]$Timings)
     if (-not $Path) { return $null }
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return 'Missing' }
     try {
-        return Get-SentinelContentSignatureStatus $Path
+        return Get-SentinelContentSignatureStatus $Path -Timings $Timings
     } catch {
         Write-SentinelError -Root $Root -Component "Watcher" -Operation "Read Authenticode signature" -Exception $_.Exception -Context @{Path=$Path} -Severity "MEDIUM"
         return 'Unavailable'
@@ -217,8 +217,11 @@ function Get-FileSignatureStatus {
 }
 
 function Get-ProcessScore {
-    param($ProcessInfo)
-    if (Test-SentinelInternalResponse -Root $Root -ProcessInfo $ProcessInfo) { return [pscustomobject]@{Score=0;Reasons=@('Verified SentinelLocal response invocation')} }
+    param($ProcessInfo,[hashtable]$Timings,[switch]$RecordedIdentity)
+    $phase=if($Timings){[Diagnostics.Stopwatch]::StartNew()}else{$null}
+    try{$internal=Test-SentinelInternalResponse -Root $Root -ProcessInfo $ProcessInfo}
+    finally{if($Timings){$Timings.InternalResponseSeconds+=$phase.Elapsed.TotalSeconds}}
+    if ($internal) { return [pscustomobject]@{Score=0;Reasons=@('Verified SentinelLocal response invocation')} }
     $score=0
     $reasons=New-Object System.Collections.Generic.List[string]
     $path=[string]$ProcessInfo.ExecutablePath
@@ -244,15 +247,28 @@ function Get-ProcessScore {
         }
     }
 
-    $signatureStatus = Get-FileSignatureStatus $path
+    $signatureAssessment=$null
+    if($RecordedIdentity -and (Test-SentinelRecordedSignatureIdentity $ProcessInfo)){
+        try{
+            $signatureAssessment=Get-SentinelRecordedSignatureAssessment $ProcessInfo -Timings $Timings
+            $signatureStatus=$signatureAssessment.ObservedStatus
+        }catch{
+            Write-SentinelError -Root $Root -Component 'Watcher' -Operation 'Assess recorded content signature' -Exception $_.Exception -Context @{Path=$path} -Severity MEDIUM
+            $signatureStatus='Unavailable'
+        }
+    }else{$signatureStatus = Get-FileSignatureStatus $path -Timings $Timings}
     if ($signatureStatus -and [string]$signatureStatus -ne "Valid") {
-        $score+=15; $reasons.Add("Executable is not validly signed")
+        $score+=15
+        if($signatureStatus -eq 'ObservedHashMismatch'){$reasons.Add('Recorded content hash could not be verified')}
+        else{$reasons.Add("Executable is not validly signed")}
     }
 
     try {
-        if (Test-Path -LiteralPath $path) {
-            $originalFilename = (Get-Item -LiteralPath $path -ErrorAction Stop).VersionInfo.OriginalFilename
-            if ($originalFilename -and ([IO.Path]::GetFileName($path) -ne $originalFilename) -and $path -match '(?i)\\ProgramData\\') {
+        if ($path -match '(?i)\\ProgramData\\' -and (Test-Path -LiteralPath $path)) {
+            if($Timings){$Timings.OriginalFilenameReads++;$phase.Restart()}
+            try{$originalFilename = Get-SentinelOriginalFilename $path}
+            finally{if($Timings){$Timings.OriginalFilenameSeconds+=$phase.Elapsed.TotalSeconds}}
+            if ($originalFilename -and ([IO.Path]::GetFileName($path) -ne $originalFilename)) {
                 $score+=25; $reasons.Add("Original filename differs while executing from ProgramData")
             }
         }
@@ -260,7 +276,7 @@ function Get-ProcessScore {
         Write-SentinelError -Root $Root -Component "Watcher" -Operation "Read original filename" -Exception $_.Exception -Context @{Path=$path} -Severity "MEDIUM"
     }
 
-    return [pscustomobject]@{Score=$score;Reasons=@($reasons)}
+    return [pscustomobject]@{Score=$score;Reasons=@($reasons);SignatureAssessment=$signatureAssessment}
 }
 
 function Get-ImmediateNetworkSnapshot {
@@ -957,7 +973,7 @@ if($AnalysisOnly){
     while($true){
         Write-AnalysisHeartbeat
         try{
-            $worked=Invoke-SentinelPendingSysmonAnalysis -Root $Root -Config $config -ScoreProcess {param($observed) Get-ProcessScore $observed} -QueueResponse {
+            $worked=Invoke-SentinelPendingSysmonAnalysis -Root $Root -Config $config -ScoreProcess {param($observed,$scoreTimings) Get-ProcessScore $observed -Timings $scoreTimings -RecordedIdentity} -QueueResponse {
                 param($path,$processIdValue,$score,$observed)
                 Queue-SentinelResponse -FilePath $path -ProcessIdValue $processIdValue -Score $score.Score -Reasons $score.Reasons -Source Sysmon -ObservedProcess $observed
             } -Progress {param($completed) Write-AnalysisHeartbeat}
