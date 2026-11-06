@@ -33,8 +33,10 @@ function Get-SentinelBenchmarkHealth([string]$Root,$Config) {
 }
 
 function Get-SentinelBenchmarkSummary($Trials,$Records,[bool]$ObservationValid) {
+    $byProcess=@{}
+    foreach($record in $Records){if($record.Type -eq 'ProcessCreated' -and $record.Source -eq 'Sysmon' -and $record.MetadataComplete){$key=[string]$record.Process.ProcessId;if(-not $byProcess.ContainsKey($key)){$byProcess[$key]=[Collections.Generic.List[object]]::new()};$byProcess[$key].Add($record)}}
     $rows=@(foreach($trial in $Trials){
-        $candidates=@($Records | Where-Object {
+        $candidates=@($byProcess[[string]$trial.ProcessId] | Where-Object {
             $_.Type -eq 'ProcessCreated' -and $_.Source -eq 'Sysmon' -and $_.MetadataComplete -and
             $_.Process.ProcessId -eq $trial.ProcessId -and $_.Process.ExecutablePath -ieq $trial.ExecutablePath -and $_.Process.ObservedSHA256 -ieq $trial.SHA256 -and
             [math]::Abs((([datetimeoffset]$_.Process.CreationDate)-([datetimeoffset]$trial.ProcessCreatedAt)).TotalMilliseconds) -le 100 -and
@@ -126,6 +128,7 @@ function Invoke-SentinelBenignBenchmark([string]$Root,[string]$OutputDirectory,[
     Write-Host 'Observation phase ended; collecting the final health sample.'
     $samples+=@(Get-SentinelBenchmarkHealth $rootPath $config)
     Write-SentinelAtomicJson (Join-Path $output 'health-samples.json') $samples
+    if($trials.Count){$script:SentinelBenchmarkCapture=@{start=[string]$trials[0].StartedAt;end=[string]$trials[-1].ObservationEndedAt;pids=@($trials | ForEach-Object {[long]$_.ProcessId})}}
     Write-Host 'Checking post-observation baseline; historical log verification may take several minutes.'
     try {$post=Wait-SentinelObservationBaseline $rootPath}
     catch {$errors+=@($_.Exception.Message);$post=[pscustomobject]@{ReadyForBenignTrials=$false;Environment=[pscustomobject]@{ConfigSHA256=$null};Error=$_.Exception.Message}}
@@ -144,14 +147,14 @@ function Invoke-SentinelBenignBenchmark([string]$Root,[string]$OutputDirectory,[
         Write-Host 'Snapshot ready; verifying and reading process creation records.'
         $path=Join-Path $snapshot 'logs\process-events.jsonl'
         if(-not (Get-SentinelLogVerification $path).Valid){throw 'Process snapshot verification failed.'}
-        $records=@(Read-SentinelLogRows $path)
+        $records=@(Read-SentinelBenchmarkRows $path)
         Write-Host 'Reading Sysmon continuity evidence.'
-        $source=@(Read-SentinelLogRows (Join-Path $snapshot 'logs\sysmon-events.jsonl'))
+        $source=@(Read-SentinelBenchmarkRows (Join-Path $snapshot 'logs\sysmon-events.jsonl'))
         Write-Host 'Reading Sentinel alert history.'
-        $alerts=@(Read-SentinelLogRows (Join-Path $snapshot 'logs\alerts.jsonl'))
+        $alerts=@(Read-SentinelBenchmarkRows (Join-Path $snapshot 'logs\alerts.jsonl'))
         Write-Host 'Reading Sentinel error history and checking the observation window.'
         $sourceErrors=@();$errorPath=Join-Path $snapshot 'logs\errors.jsonl'
-        if(Test-Path $errorPath){$sourceErrors=@(Read-SentinelLogRows $errorPath)}
+        if(Test-Path $errorPath){$sourceErrors=@(Read-SentinelBenchmarkRows $errorPath)}
         if($windowStart){Assert-SentinelBenchmarkTelemetryWindow $source $alerts $sourceErrors $windowStart $windowEnd}
         Write-Host 'Reading Defender evidence for the observation window.'
         [void](Get-EvaluationEventChannel 'Microsoft-Windows-Windows Defender/Operational')
@@ -162,6 +165,7 @@ function Invoke-SentinelBenignBenchmark([string]$Root,[string]$OutputDirectory,[
         $defender=@($native | Sort-Object RecordId | ForEach-Object {[pscustomobject]@{Id=$_.Id;RecordId=$_.RecordId;TimeCreated=$_.TimeCreated.ToUniversalTime().ToString('o');Data=(Get-SentinelEventData $_);Xml=$_.ToXml()}})
         Write-SentinelAtomicJson (Join-Path $output 'defender-events.json') $defender;$defenderStatus='ReadSucceeded'
     }catch{$errors+=@($_.Exception.Message)}
+    $script:SentinelBenchmarkCapture=$null
     Write-Host 'Matching trial identities and writing the measurement summary.'
     $summary=Get-SentinelBenchmarkSummary $trials $records ($errors.Count -eq 0)
     $packet=[ordered]@{Schema=1;Kind='BenignBenchmarkPacket';CapturedAt=[datetimeoffset]::Now.ToString('o');Root=$rootPath;Environment=$pre.Environment;Plan=$plan;Trials=$trials;Snapshot=$snapshot;DefenderStatus=$defenderStatus;HealthSampleCount=$samples.Count;MaximumSampleGapSeconds=$maxGap;Errors=$errors;Capture=$summary;PerformanceMeasured=$false;ReviewRequired=$true;Scope='Capture fraction and ingestion timing for this fixed benign workload. Alert attribution must be reviewed separately; no malware efficacy or ATT&CK measurement.'}

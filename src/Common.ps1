@@ -8,6 +8,7 @@
 . (Join-Path $PSScriptRoot 'DetectionSafety.ps1')
 . (Join-Path $PSScriptRoot 'TaskIntegrity.ps1')
 . (Join-Path $PSScriptRoot 'SysmonMonitoring.ps1')
+. (Join-Path $PSScriptRoot 'NativeEngine.ps1')
 
 function Get-SentinelStringHash {
     param([Parameter(Mandatory=$true)][string]$Text)
@@ -369,6 +370,9 @@ function Get-SentinelCriticalFileNames {
         "EventMonitoring.ps1",
         "ResponseExecution.ps1",
         "SysmonMonitoring.ps1",
+        "NativeEngine.ps1",
+        "sentinel_engine.dll",
+        "sentinel-engine.json",
         "Status.ps1",
         "Config.json",
         "DefenderHealth.ps1",
@@ -411,7 +415,9 @@ function Get-SentinelSourcePath {
     $flat=Join-Path $Root $Name
     if(Test-Path -LiteralPath $flat -PathType Leaf) { return [IO.Path]::GetFullPath($flat) }
     $runtime=@('DetectionSafety.ps1','TaskIntegrity.ps1','Common.ps1','LogIntegrity.ps1','EventMonitoring.ps1','ResponseExecution.ps1','OperationalSafety.ps1','Deployment.ps1','PackageTrust.ps1','PolicyManagement.ps1','DefenderHealth.ps1','Response.ps1','ResponseWorker.ps1','Watcher.ps1','IntegrityMonitor.ps1','Invoke-SentinelResponse.ps1','Status.ps1','SysmonMonitoring.ps1')
-    $relative=if($Name -eq 'Config.json') { 'config\Config.json' }
+    $relative=if($Name -in @('sentinel_engine.dll','sentinel-engine.json')) { 'native\bin\'+$Name }
+        elseif($Name -eq 'NativeEngine.ps1') { 'src\'+$Name }
+        elseif($Name -eq 'Config.json') { 'config\Config.json' }
         elseif($Name -eq 'README_JP.txt') { 'docs\README_JP.txt' }
         elseif($Name -in $runtime) { 'src\'+$Name }
         elseif($Name -like '*.ps1') { 'scripts\'+$Name }

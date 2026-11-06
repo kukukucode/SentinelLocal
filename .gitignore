@@ -13,3 +13,7 @@ Desktop.ini
 reports/
 readiness*.json
 package.manifest.json*
+
+# Reproducible native builds (source and Cargo.lock are tracked)
+native/target/
+native/bin/
