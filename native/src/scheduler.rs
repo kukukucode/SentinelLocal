@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use std::{
     cmp::Reverse,
     collections::{BinaryHeap, HashMap, HashSet},
+    io::Read,
     path::Path,
     time::UNIX_EPOCH,
 };
@@ -81,14 +82,12 @@ impl Scheduler {
                 if seen.len() > 10000 {
                     return Err("Scheduler inventory bound exceeded".into());
                 }
-                let (sha, size) = storage::digest(&path)?;
+                let mut file = storage::read(&path)?;
+                let m = file.metadata().map_err(|e| e.to_string())?;
+                let size = m.len();
                 if size > 4 * 1024 * 1024 {
                     return Err("Request metadata too large".into());
                 }
-                if self.items.get(&key).is_some_and(|r| r.sha == sha) {
-                    continue;
-                }
-                let m = path.metadata().map_err(|e| e.to_string())?;
                 let created = m
                     .created()
                     .map_err(|e| e.to_string())?
@@ -96,16 +95,29 @@ impl Scheduler {
                     .map_err(|e| e.to_string())?
                     .as_nanos() as i128
                     / 100;
-                let parsed = storage::json_file(&path, 4 * 1024 * 1024);
+                let mut bytes = Vec::with_capacity(size as usize);
+                file.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+                use sha2::Digest;
+                let sha = storage::hex(sha2::Sha256::digest(&bytes));
+                if self
+                    .items
+                    .get(&key)
+                    .is_some_and(|r| r.sha == sha && r.created == created)
+                {
+                    continue;
+                }
+                let parsed = canonical::parse(&bytes);
                 let (mut queued, mut available) = (created, 0);
                 if let Ok(p) = parsed {
                     let result = (|| -> Result<(i128, i128), String> {
-                        let q = if let Some(s) = p["QueuedAt"].as_str() {
+                        let q = if let Some(s) = p["QueuedAt"].as_str().filter(|s| !s.is_empty()) {
                             canonical::ticks(s)?
                         } else {
                             created
                         };
-                        let a = if let Some(s) = p["AvailableAfter"].as_str() {
+                        let a = if let Some(s) =
+                            p["AvailableAfter"].as_str().filter(|s| !s.is_empty())
+                        {
                             canonical::ticks(s)?
                         } else {
                             0

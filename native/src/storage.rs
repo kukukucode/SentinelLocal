@@ -40,7 +40,13 @@ pub fn read(path: &Path) -> Result<File, String> {
     o.open(path).map_err(|e| e.to_string())
 }
 pub fn hex(bytes: impl AsRef<[u8]>) -> String {
-    bytes.as_ref().iter().map(|b| format!("{b:02X}")).collect()
+    const DIGITS: &[u8] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(bytes.as_ref().len() * 2);
+    for &byte in bytes.as_ref() {
+        out.push(DIGITS[(byte >> 4) as usize] as char);
+        out.push(DIGITS[(byte & 15) as usize] as char);
+    }
+    out
 }
 pub fn digest(path: &Path) -> Result<(String, u64), String> {
     let mut f = read(path)?;

@@ -58,6 +58,11 @@ pub fn request(input: &[u8]) -> Vec<u8> {
 
 /// The host owns input memory; the returned allocation must be freed with sentinel_free.
 /// No Rust reference is retained across the ABI boundary.
+///
+/// # Safety
+/// `input` must point to `length` readable bytes and `output_length` to writable
+/// storage. The caller must pass the returned pointer and exact length to
+/// `sentinel_free` once, without modifying the allocation.
 #[no_mangle]
 pub unsafe extern "C" fn sentinel_call(
     input: *const u8,
@@ -73,6 +78,9 @@ pub unsafe extern "C" fn sentinel_call(
 }
 
 #[no_mangle]
+/// # Safety
+/// The pointer and length must be an outstanding allocation returned by
+/// `sentinel_call`; no other allocator or duplicate free is permitted.
 pub unsafe extern "C" fn sentinel_free(pointer: *mut u8, length: usize) {
     if !pointer.is_null() {
         drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(

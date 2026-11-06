@@ -411,7 +411,7 @@ function Get-SentinelSourceRoot {
 
 function Get-SentinelSourcePath {
     param([string]$Root,[string]$Name)
-    if($Name -notin @(Get-SentinelPackageFiles) -and $Name -notin @('README.md','README_JP.txt','CHANGELOG.txt','docs/OPERATIONS_JP.md','docs/PILOT_JP.md','docs/REPOSITORY_JP.md','docs/SECURITY_JP.md','docs/EVALUATION_JP.md','docs/INGESTION_STORAGE_JP.md')) { throw 'Unknown SentinelLocal source file.' }
+    if($Name -notin @(Get-SentinelPackageFiles) -and $Name -notin @('README.md','README_JP.txt','CHANGELOG.txt','docs/OPERATIONS_JP.md','docs/PILOT_JP.md','docs/REPOSITORY_JP.md','docs/SECURITY_JP.md','docs/EVALUATION_JP.md','docs/INGESTION_STORAGE_JP.md','docs/NATIVE_ENGINE_JP.md')) { throw 'Unknown SentinelLocal source file.' }
     # Installed and distribution packages retain their flat file layout.
     $flat=Join-Path $Root $Name
     if(Test-Path -LiteralPath $flat -PathType Leaf) { return [IO.Path]::GetFullPath($flat) }
