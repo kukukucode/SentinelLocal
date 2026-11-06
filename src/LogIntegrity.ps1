@@ -71,6 +71,13 @@ function Enter-SentinelLogLock {
 
 function Get-SentinelLogSnapshot {
     param([string]$Path)
+    if($script:SentinelUseLegacyLogVerifier){return Get-SentinelLegacyLogSnapshot $Path}
+    if(-not (Test-Path -LiteralPath $Path)){return [pscustomobject]@{LineCount=0L;LastHash=$null;FirstPreviousHash=$null;ByteLength=0L}}
+    return Get-SentinelNativeLogScan $Path
+}
+
+function Get-SentinelLegacyLogSnapshot {
+    param([string]$Path)
     $count = 0L; $last = $null; $first = $null
     if (Test-Path -LiteralPath $Path) {
         foreach ($line in [System.IO.File]::ReadLines($Path)) {
@@ -172,7 +179,7 @@ function Add-SentinelChainedRecords {
         $willRotate=$MaxFileBytes -gt 0 -and $before.ByteLength -gt 0 -and $before.ByteLength+$bytes.Length+$extraBom -gt $MaxFileBytes
         if($willRotate){$extraBom=3}
         if($MaxFileBytes -gt 0 -and $bytes.Length+3 -gt $MaxFileBytes){throw 'A single log batch exceeds the segment limit.'}
-        if($MaxTotalBytes -gt 0){$total=0L;foreach($file in @(Get-ChildItem -LiteralPath (Split-Path -Parent $Path) -File -Filter '*.jsonl' -ErrorAction Stop)){$total+=$file.Length};if($total+$bytes.Length+$extraBom -gt $MaxTotalBytes){throw 'Total log capacity reached; retained evidence was not deleted.'}}
+        if($MaxTotalBytes -gt 0){$total=[long](Invoke-SentinelNative @{op='inventory';path=(Split-Path -Parent $Path);extension='jsonl'}).Bytes;if($total+$bytes.Length+$extraBom -gt $MaxTotalBytes){throw 'Total log capacity reached; retained evidence was not deleted.'}}
         if($willRotate){Move-SentinelLogSegment $Path $before;$before=Get-SentinelLogCheckpoint $Path}
         $after = [ordered]@{Schema=2;LogPath=$Path;LastHash=$last;FirstPreviousHash=$before.FirstPreviousHash;LineCount=([long]$before.LineCount + $Payloads.Count);ByteLength=([long]$before.ByteLength + $bytes.Length + $extraBom);LastUpdated=(Get-Date).ToString('o')}
         if($before.PSObject.Properties['SegmentSequence']){$after['SegmentSequence']=[long]$before.SegmentSequence}
@@ -310,7 +317,7 @@ function Copy-SentinelLogSnapshot {
         $state=Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
         if(-not $state.PSObject.Properties['ArchiveOf']){if(-not (Get-SentinelLogVerification $path).Valid){throw ('Copied stream/segments failed verification: '+$name)}}
         elseif([string]$state.ArchiveOf -cnotin $names){throw 'Segment active stream missing from snapshot.'}
-        $entry=[ordered]@{Name=$name;SHA256=(Get-FileHash -LiteralPath $path).Hash;Length=[long]$state.ByteLength;LineCount=[long]$state.LineCount;LastHash=[string]$state.LastHash}
+        $entry=[ordered]@{Name=$name;SHA256=(Get-SentinelVerifiedLogDigest $path);Length=[long]$state.ByteLength;LineCount=[long]$state.LineCount;LastHash=[string]$state.LastHash}
         if(Test-Path -LiteralPath ($statePath+'.segments.json')){$entry['SegmentIndexSHA256']=(Get-FileHash -LiteralPath ($statePath+'.segments.json')).Hash}
         $entries+=@($entry)
     }
@@ -389,8 +396,11 @@ function Read-SentinelSegmentIndex {
         if(-not (Test-Path -LiteralPath $archive -PathType Leaf) -or (Get-Item -LiteralPath $archive).Length -ne [long]$entry.Length){throw ('Missing/truncated segment: '+$expected)}
         $state=Get-Content -LiteralPath (Get-SentinelChainPath $archive) -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
         if($state.ArchiveOf -cne $index.Stream -or $state.LastHash -ne $entry.LastHash -or $state.FirstPreviousHash -ne $entry.FirstPreviousHash -or $state.ByteLength -ne $entry.Length -or $state.LineCount -ne $entry.LineCount){throw 'Segment checkpoint differs from index.'}
-        if(($Deep -or $ValidateDigests) -and (Get-FileHash -LiteralPath $archive).Hash -ne $entry.SHA256){throw ('Invalid segment digest: '+$expected)}
-        if($Deep -and -not (Test-SentinelSnapshotMatches (Get-SentinelLogSnapshot $archive) $state)){throw ('Invalid segment chain: '+$expected)}
+        if($Deep){
+            $verified=Get-SentinelLogSnapshot $archive
+            $digest=if($verified.PSObject.Properties['SHA256']){$verified.SHA256}else{(Get-FileHash -LiteralPath $archive).Hash}
+            if($digest -ne $entry.SHA256 -or -not (Test-SentinelSnapshotMatches $verified $state)){throw ('Invalid segment chain/digest: '+$expected)}
+        }elseif($ValidateDigests -and (Get-FileHash -LiteralPath $archive).Hash -ne $entry.SHA256){throw ('Invalid segment digest: '+$expected)}
         $previous=[string]$entry.LastHash
     }
     if($index.NextSequence -ne $sequence+1){throw 'Segment sequence gap.'}

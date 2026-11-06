@@ -20,6 +20,9 @@
         $cache=@{};Write-SentinelAtomicJson $cachePath ([ordered]@{Processes=@()})
         Write-SentinelAtomicJson $cursorPath ([ordered]@{RecordId=0L;TimeCreated=''})
     }
+    $expiryContext='correlations|'+[IO.Path]::GetFullPath($Root).ToLowerInvariant()
+    $expiryRows=@(foreach($key in $cache.Keys){@{key=[string]$key;at=([datetimeoffset]::Parse([string]$cache[$key].SeenAt).LocalDateTime.Ticks.ToString())}})
+    [void](Invoke-SentinelNative @{op='expiry_reset';context=$expiryContext;rows=$expiryRows})
     $processingStarted=Get-SentinelSysmonMonotonicSeconds
     $uncommitted=0;$lastCompleted=$null
     $commitState={
@@ -43,7 +46,8 @@
         if(-not $deferred -and -not (Write-SentinelJsonLine (Join-Path $Root 'logs\sysmon-events.jsonl') ([ordered]@{Type='SysmonEvent';EventId=$event.Id;RecordId=$event.RecordId;EventTime=$event.TimeCreated.ToString('o');Data=$data}))) {throw 'Cannot persist Sysmon event.'}
         # Expire by event time and bound cardinality; never correlate by a reused PID.
         $cutoff=([datetime]$event.TimeCreated).AddHours(-1)
-        foreach($key in @($cache.Keys)) {if([datetimeoffset]::Parse([string]$cache[$key].SeenAt).LocalDateTime -lt $cutoff){$cache.Remove($key)}}
+        $expired=Invoke-SentinelNative @{op='expiry_take';context=$expiryContext;before=$cutoff.Ticks.ToString()}
+        foreach($key in @($expired.Keys)){$cache.Remove([string]$key)}
         if($event.Id -eq 1) {
             $process=ConvertFrom-SentinelSysmonProcess $data
             $complete=$process.ProcessId -gt 0 -and [IO.Path]::IsPathRooted($process.ExecutablePath) -and $process.CommandLine -and $process.ProcessGuid -and $process.ObservedSHA256
@@ -60,6 +64,7 @@
             # Zero-score metadata is already durable; cache correlation candidates only.
             if($process.ProcessGuid -and $score.Score -gt 0) {
                 $cache[$process.ProcessGuid]=[pscustomobject]@{Process=$process;BaseScore=[int]$score.Score;Reasons=@($score.Reasons);NetworkSeen=$false;DnsSeen=$false;SeenAt=$event.TimeCreated.ToString('o')}
+                [void](Invoke-SentinelNative @{op='expiry_set';context=$expiryContext;key=[string]$process.ProcessGuid;at=$event.TimeCreated.Ticks.ToString()})
             }
         } elseif($event.Id -in @(3,22)) {
             $guid=[string]$data.ProcessGuid
@@ -92,7 +97,8 @@
             }
         }
         if($cache.Count -gt 1000) {
-            foreach($row in @($cache.Values | Sort-Object SeenAt | Select-Object -First ($cache.Count-1000))) {$cache.Remove([string]$row.Process.ProcessGuid)}
+            $evicted=Invoke-SentinelNative @{op='expiry_take';context=$expiryContext;before=$cutoff.Ticks.ToString();limit=1000}
+            foreach($key in @($evicted.Keys)){$cache.Remove([string]$key)}
         }
         $lastCompleted=$event;$uncommitted++
         $yield=(Get-SentinelSysmonMonotonicSeconds)-$processingStarted -ge $MaximumProcessingSeconds
@@ -116,6 +122,13 @@ function Assert-SentinelSysmonDataPath {
 }
 
 function Get-SentinelSysmonQueueState {
+    param([string]$Root)
+    Assert-SentinelSysmonDataPath (Join-Path $Root 'state\sysmon-analysis')
+    $mutex=Enter-SentinelLogLock (Join-Path $Root 'state\sysmon-analysis.queue')
+    try{return Invoke-SentinelNative @{op='queue_state';root=[IO.Path]::GetFullPath($Root)}}finally{$mutex.ReleaseMutex();$mutex.Dispose()}
+}
+
+function Get-SentinelLegacySysmonQueueState {
     param([string]$Root)
     $directory=Join-Path $Root 'state\sysmon-analysis'
     Assert-SentinelSysmonDataPath $directory
@@ -276,12 +289,13 @@ function Get-SentinelContentSignatureStatus {
         $key=[IO.Path]::GetFullPath($Path).ToLowerInvariant()+'|'+$hash
         if(-not $script:SentinelSignatureCache){$script:SentinelSignatureCache=@{}}
         $entry=$script:SentinelSignatureCache[$key];$now=[datetimeoffset]::Now
-        if($entry -and ($now-$entry.At).TotalSeconds -ge 0 -and ($now-$entry.At).TotalSeconds -le 15){if($Timings){$Timings.SignatureCacheHits++};return $entry.Status}
+        if($entry -and ($now-$entry.At).TotalSeconds -ge 0 -and ($now-$entry.At).TotalSeconds -le 15){Update-SentinelSignatureLru $key;if($Timings){$Timings.SignatureCacheHits++};return $entry.Status}
         if($Timings){$Timings.SignatureCacheMisses++;$phase.Restart()}
         try{$status=(Get-AuthenticodeSignature -FilePath $Path -ErrorAction Stop).Status}
         finally{if($Timings){$Timings.AuthenticodeSeconds+=$phase.Elapsed.TotalSeconds}}
-        if($script:SentinelSignatureCache.Count -ge 256){$script:SentinelSignatureCache.Clear()}
+        if($script:SentinelSignatureCache.Count -eq 0){[void](Invoke-SentinelNative @{op='lru_reset';context='signature'})}
         $script:SentinelSignatureCache[$key]=[pscustomobject]@{At=$now;Status=$status;VerifiedSHA256=$hash}
+        Update-SentinelSignatureLru $key
         return $status
     }finally{$stream.Dispose()}
 }
@@ -304,6 +318,7 @@ function Get-SentinelRecordedSignatureAssessment {
     $entry=if($script:SentinelSignatureCache){$script:SentinelSignatureCache[$key]}else{$null}
     $now=[datetimeoffset]::Now
     if($entry -and $entry.VerifiedSHA256 -ceq $expected -and ($now-$entry.At).TotalSeconds -ge 0 -and ($now-$entry.At).TotalSeconds -le 15){
+        Update-SentinelSignatureLru $key
         if($Timings){$Timings.RecordedSignatureCacheHits++}
         return [pscustomobject]@{ObservedStatus=[string]$entry.Status;Basis='VerifiedRecordedContent';RecordedSHA256=$expected;CurrentHashChecked=$false;CurrentHashMatched=$false}
     }

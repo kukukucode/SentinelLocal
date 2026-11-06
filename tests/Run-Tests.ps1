@@ -175,7 +175,7 @@ Run-Test 'Busy process requires fresh heartbeat and bounded request time' {
 }
 Run-Test 'Response subprocess success and timeout are both handled' {
     $root=New-ProbeRoot 'bounded'
-    foreach ($name in @('Common.ps1','LogIntegrity.ps1','EventMonitoring.ps1','ResponseExecution.ps1','OperationalSafety.ps1','Deployment.ps1','PackageTrust.ps1','PolicyManagement.ps1','DetectionSafety.ps1','TaskIntegrity.ps1','SysmonMonitoring.ps1','Invoke-SentinelResponse.ps1')) { Copy-Item -LiteralPath (Get-SentinelSourcePath $packageRoot $name) -Destination $root }
+    foreach ($name in @('Common.ps1','LogIntegrity.ps1','EventMonitoring.ps1','ResponseExecution.ps1','OperationalSafety.ps1','Deployment.ps1','PackageTrust.ps1','PolicyManagement.ps1','DetectionSafety.ps1','TaskIntegrity.ps1','SysmonMonitoring.ps1','NativeEngine.ps1','sentinel_engine.dll','sentinel-engine.json','NATIVE-NOTICES.txt','Invoke-SentinelResponse.ps1')) { Copy-Item -LiteralPath (Get-SentinelSourcePath $packageRoot $name) -Destination $root }
     $request=Join-Path $root 'request.json'; Set-Content $request '{}'
     $responsePath=Join-Path $root 'Response.ps1'; Set-Content $responsePath 'param($Root,$RequestFile); [pscustomobject]@{Status="Completed"}' -Encoding UTF8
     $completed=Invoke-SentinelBoundedResponse -Root $root -RequestFile $request -TimeoutSeconds 20 -HeartbeatSeconds 1
@@ -264,7 +264,7 @@ Run-Test 'Enabled Sysmon records events and queues literal script arguments' {
 }
 Run-Test 'Worker retries failed scan and deduplicates only completed scans' {
     $root=New-ProbeRoot 'worker-integration'
-    foreach ($name in @('Common.ps1','LogIntegrity.ps1','EventMonitoring.ps1','ResponseExecution.ps1','OperationalSafety.ps1','Deployment.ps1','PackageTrust.ps1','PolicyManagement.ps1','DetectionSafety.ps1','TaskIntegrity.ps1','SysmonMonitoring.ps1','ResponseWorker.ps1','Invoke-SentinelResponse.ps1')) { Copy-Item -LiteralPath (Get-SentinelSourcePath $packageRoot $name) -Destination $root }
+    foreach ($name in @('Common.ps1','LogIntegrity.ps1','EventMonitoring.ps1','ResponseExecution.ps1','OperationalSafety.ps1','Deployment.ps1','PackageTrust.ps1','PolicyManagement.ps1','DetectionSafety.ps1','TaskIntegrity.ps1','SysmonMonitoring.ps1','NativeEngine.ps1','sentinel_engine.dll','sentinel-engine.json','NATIVE-NOTICES.txt','ResponseWorker.ps1','Invoke-SentinelResponse.ps1')) { Copy-Item -LiteralPath (Get-SentinelSourcePath $packageRoot $name) -Destination $root }
     [IO.File]::AppendAllText((Join-Path $root 'Common.ps1'),"`nfunction Write-EventLog { }`n")
     $workerPath=Join-Path $root 'ResponseWorker.ps1'
     $workerText=[IO.File]::ReadAllText($workerPath).Replace('Global\SentinelLocalResponseWorker','Global\SentinelLocalTestWorker_'+[guid]::NewGuid().ToString('N'))
@@ -293,7 +293,7 @@ if ([int]$request.Attempts -eq 0) { throw 'Mock first scan fails' }
         } until ($completed -or (Get-Date) -gt $deadline -or $child.Process.HasExited)
         Assert $completed ('Worker did not complete retry; '+$(if($child.Process.HasExited){$child.Err.Result}else{'deadline'}))
         Assert (@($entries | Where-Object Type -eq 'ResponseRequestRetry').Count -eq 1) 'Failed scan was not retried exactly once'
-        $hashState=Get-Content (Join-Path $root 'state\response-hash-dedupe.json') -Raw | ConvertFrom-Json
+        $hashState=(Invoke-SentinelNative @{op='journal_open';path=(Join-Path $root 'state\response-hash-dedupe.json');mode='hash';now=[datetimeoffset]::Now.ToString('o');max_age=3600}).Rows
         Assert (@($hashState).Count -eq 1 -and $hashState.SHA256 -eq (Get-FileHash $target).Hash) 'Completed scan did not populate dedupe state'
         Assert (-not (Test-Path $requestPath)) 'Completed request still in queue'
     } finally { if (-not $child.Process.HasExited) { $child.Process.Kill() }; $child.Process.Dispose() }

@@ -1,4 +1,10 @@
-﻿Unreleased - ingestion and log reliability (Windows, 2026-10-16)
+﻿Unreleased - Rust streaming engine (Windows x64, 2026-11-06)
+- Index benchmark candidates once by PID, retaining path/hash/creation/argument checks and ambiguity handling.
+- Verify JSONL chain, raw SHA256, counters, selected rows and time ranges in a bounded Rust stream. Reuse proofs only after hashing actual bytes; retain PowerShell 5.1 canonical fallback.
+- Use generation-tagged expiry and ready/delayed heaps, bounded signature LRU, byte-bound queue catalogs and reconciled capacity deltas. Keep filesystem and immutable-payload validation.
+- Persist dedupe deltas through flushed checksum/sequence WAL frames and periodic snapshots; preserve corrupt state and disable persistent reuse conservatively.
+- Include native DLL, pinned build metadata and dependency notices in protected staging and integrity baselines. Keep OS application-control protection enabled; the new engine is not deployed to the measured PC.
+Unreleased - ingestion and log reliability (Windows, 2026-10-16)
 - Print the benchmark output folder immediately and report post-observation verification, snapshot, evidence-read and summary phases; clamp an elapsed observation countdown to zero without changing the observation deadline.
 - Reuse byte-verified signatures for trusted recorded Sysmon content by path and observed SHA256 for at most 15 seconds, with explicit historical assessment/current-hash-check metadata; current-file and response validation still hash actual bytes, and mismatched source hashes cannot prime reuse.
 - Restrict original-filename resource reads to the ProgramData rename rule; retain signature checks and byte-bound reuse, export scoring subphase timings, and add a read-only pending-event scoring diagnostic without queue acknowledgements.

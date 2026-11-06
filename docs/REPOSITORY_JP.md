@@ -6,6 +6,8 @@ Windows専用です。リポジトリのルートにはREADME、変更履歴、G
 | --- | --- |
 | bootstrap/ | payloadとは独立して信頼・署名する導入Bootstrap |
 | src/ | Watcher、Response、Worker、整合性監視と共通ライブラリ |
+| native/ | Rustの逐次解析・キュー管理エンジンと固定したCargo.lock |
+| tools/native/ | ネイティブビルド・任意のAuthenticode署名 |
 | scripts/ | インストール・更新・アンインストール、診断、設定変更、状態画面、配布作成 |
 | config/Config.json | 配布時の初期設定 |
 | docs/ | 日本語説明書、運用・試験運用・構成ガイド |
@@ -18,7 +20,9 @@ Windows専用です。リポジトリのルートにはREADME、変更履歴、G
 リポジトリのルートを作業フォルダーとして、Windows PowerShell 5.1で実行します。
 
 ~~~powershell
+.\tools\native\Build-SentinelEngine.ps1
 .\scripts\SelfTest-SentinelLocal.ps1 -Root . -PreStart
+.\tests\Run-NativeEngineTests.ps1
 .\tests\Run-Tests.ps1
 .\tests\Run-PilotTests.ps1
 .\tests\Run-SecurityTests.ps1
