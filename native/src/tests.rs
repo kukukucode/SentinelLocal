@@ -171,7 +171,7 @@ fn journal_rejects_checksum_mutation_and_foreign_writer() {
     a.put(&put).unwrap();
     assert!(b.put(&put).is_err());
     let wal = f.0.join("dedupe.json.wal");
-    let data = std::fs::read_to_string(&wal).unwrap().replace("ABC", "ABD");
+    let data = std::fs::read_to_string(&wal).unwrap().replace("abc", "abd");
     std::fs::write(&wal, data).unwrap();
     assert!(Journal::open(&args).is_err());
 }

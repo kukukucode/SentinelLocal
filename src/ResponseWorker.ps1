@@ -61,11 +61,11 @@ try{
 
 function Save-HashDedupe {
     param([string]$ChangedHash)
-    if($hashDedupeDisabled){return}
+    if($hashDedupeDisabled){Remove-SentinelExpiredMemoryDedupe $hashDedupe ([Math]::Max([int]$config.ResponseHashDedupeSeconds*4,3600));return}
     try{
         $saved=Invoke-SentinelNative @{op='journal_put';path=$hashDedupePath;key=$ChangedHash;at=$hashDedupe[$ChangedHash].ToString('o');now=[datetimeoffset]::Now.ToString('o');max_age=[Math]::Max([int]$config.ResponseHashDedupeSeconds*4,3600)}
         foreach($key in @($saved.ExpiredKeys)){$hashDedupe.Remove([string]$key)}
-    }catch{Write-SentinelError -Root $Root -Component ResponseWorker -Operation 'Append completed hash journal' -Exception $_.Exception -Severity HIGH}
+    }catch{$script:hashDedupeDisabled=$true;Write-SentinelError -Root $Root -Component ResponseWorker -Operation 'Append completed hash journal; persistent reuse disabled until restart' -Exception $_.Exception -Severity HIGH}
 }
 
 

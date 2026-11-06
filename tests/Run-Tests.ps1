@@ -293,7 +293,7 @@ if ([int]$request.Attempts -eq 0) { throw 'Mock first scan fails' }
         } until ($completed -or (Get-Date) -gt $deadline -or $child.Process.HasExited)
         Assert $completed ('Worker did not complete retry; '+$(if($child.Process.HasExited){$child.Err.Result}else{'deadline'}))
         Assert (@($entries | Where-Object Type -eq 'ResponseRequestRetry').Count -eq 1) 'Failed scan was not retried exactly once'
-        $hashState=Get-Content (Join-Path $root 'state\response-hash-dedupe.json') -Raw | ConvertFrom-Json
+        $hashState=(Invoke-SentinelNative @{op='journal_open';path=(Join-Path $root 'state\response-hash-dedupe.json');mode='hash';now=[datetimeoffset]::Now.ToString('o');max_age=3600}).Rows
         Assert (@($hashState).Count -eq 1 -and $hashState.SHA256 -eq (Get-FileHash $target).Hash) 'Completed scan did not populate dedupe state'
         Assert (-not (Test-Path $requestPath)) 'Completed request still in queue'
     } finally { if (-not $child.Process.HasExited) { $child.Process.Kill() }; $child.Process.Dispose() }

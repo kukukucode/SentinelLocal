@@ -47,6 +47,7 @@ fn frame_hash(previous: &str, payload: &[u8]) -> String {
 }
 impl Journal {
     fn set(&mut self, key: String, at: String, score: i64) -> Result<(), String> {
+        let key = key.to_ascii_lowercase();
         if key.len() > 512 || key.is_empty() {
             return Err("Invalid dedupe key".into());
         }
@@ -138,9 +139,10 @@ impl Journal {
                 vec![base]
             };
             for row in rows {
-                if let Some(key) = row[&key_field].as_str() {
-                    s.set(key.into(), time(&row, &time_field)?, score(&row["Score"])?)?
-                }
+                let key = row[&key_field]
+                    .as_str()
+                    .ok_or("Invalid legacy dedupe entry")?;
+                s.set(key.into(), time(&row, &time_field)?, score(&row["Score"])?)?;
             }
         }
         let wal = s.wal();
@@ -232,7 +234,11 @@ impl Journal {
         if canonical::ticks(&at)? > now + 50_000_000 {
             return Err("Dedupe completion is in the future".into());
         }
-        let key = v["key"].as_str().ok_or("Missing dedupe key")?;
+        let normalized = v["key"]
+            .as_str()
+            .ok_or("Missing dedupe key")?
+            .to_ascii_lowercase();
+        let key = normalized.as_str();
         if key.is_empty() || key.len() > 512 {
             return Err("Invalid key".into());
         }

@@ -143,3 +143,16 @@ function Update-SentinelSignatureLru {
     $result=Invoke-SentinelNative @{op='lru_touch';context='signature';key=$Key;limit=256}
     foreach($evicted in @($result.Evicted)){$script:SentinelSignatureCache.Remove([string]$evicted)}
 }
+
+function Remove-SentinelExpiredMemoryDedupe {
+    param([hashtable]$Entries,[int]$MaxAge,[switch]$PathMode)
+    # Used only after durable journaling fails. Keep the fallback bounded without
+    # silently repairing or overwriting the damaged journal.
+    $now=[datetimeoffset]::Now
+    foreach($key in @($Entries.Keys)){
+        $at=if($PathMode){$Entries[$key].LastQueued}else{$Entries[$key]}
+        $age=($now-[datetimeoffset]$at).TotalSeconds
+        if($age -gt $MaxAge -or $age -lt -5){$Entries.Remove($key)}
+    }
+    if($Entries.Count -gt 100000){$Entries.Clear()}
+}

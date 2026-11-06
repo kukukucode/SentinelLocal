@@ -57,12 +57,12 @@ try {
 
 function Save-ResponsePathDedupe {
     param([string]$ChangedKey)
-    if($responseDedupeDisabled){return}
+    if($responseDedupeDisabled){Remove-SentinelExpiredMemoryDedupe $responsePathDedupe ([Math]::Max([int]$config.ResponseQueueDedupeSeconds*4,3600)) -PathMode;return}
     try{
         $row=$responsePathDedupe[$ChangedKey]
         $saved=Invoke-SentinelNative @{op='journal_put';path=$responseDedupeStatePath;key=$ChangedKey;at=$row.LastQueued.ToString('o');score=[int]$row.Score;now=[datetimeoffset]::Now.ToString('o');max_age=[Math]::Max([int]$config.ResponseQueueDedupeSeconds*4,3600)}
         foreach($key in @($saved.ExpiredKeys)){$responsePathDedupe.Remove([string]$key)}
-    }catch{Write-SentinelError -Root $Root -Component Watcher -Operation 'Append response dedupe journal' -Exception $_.Exception -Severity HIGH}
+    }catch{$script:responseDedupeDisabled=$true;Write-SentinelError -Root $Root -Component Watcher -Operation 'Append response dedupe journal; persistent reuse disabled until restart' -Exception $_.Exception -Severity HIGH}
 }
 
 
