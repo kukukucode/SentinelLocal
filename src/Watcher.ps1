@@ -16,6 +16,7 @@ try {
 }
 
 Assert-SentinelConfig $config
+Initialize-SentinelNative
 $logs = Join-Path $Root "logs"
 $state = Join-Path $Root "state"
 $evidence = Join-Path $Root "evidence"
@@ -45,43 +46,26 @@ $responseQueueFailed = Join-Path $responseQueueRoot "failed"
 $responseDedupeStatePath = Join-Path $state $(if($AnalysisOnly){'response-path-dedupe-sysmon.json'}else{'response-path-dedupe.json'})
 New-Item $responseQueueHigh,$responseQueueNormal,$responseQueueProcessing,$responseQueueFailed -ItemType Directory -Force | Out-Null
 
-$responsePathDedupe = @{}
-if (Test-Path -LiteralPath $responseDedupeStatePath) {
-    try {
-        foreach ($entry in @(Get-Content $responseDedupeStatePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop)) {
-            if ($entry.Key) {
-                $responsePathDedupe[[string]$entry.Key] = [pscustomobject]@{
-                    LastQueued=[datetimeoffset]::Parse([string]$entry.LastQueued)
-                    Score=[int]$entry.Score
-                }
-            }
-        }
-    } catch {
-        Write-SentinelError -Root $Root -Component "Watcher" -Operation "Load response path dedupe state" -Exception $_.Exception -Severity "MEDIUM"
-    }
+$responsePathDedupe = @{};$responseDedupeDisabled=$false
+try {
+    $saved=Invoke-SentinelNative @{op='journal_open';path=$responseDedupeStatePath;mode='path';now=[datetimeoffset]::Now.ToString('o');max_age=[Math]::Max([int]$config.ResponseQueueDedupeSeconds*4,3600)}
+    foreach($entry in @($saved.Rows)){$responsePathDedupe[[string]$entry.Key]=[pscustomobject]@{LastQueued=[datetimeoffset]::Parse([string]$entry.LastQueued);Score=[int]$entry.Score}}
+}catch{
+    $responsePathDedupe=@{};$responseDedupeDisabled=$true
+    Write-SentinelError -Root $Root -Component Watcher -Operation 'Load dedupe journal; persistent reuse disabled and existing evidence preserved' -Exception $_.Exception -Severity HIGH
 }
 
 function Save-ResponsePathDedupe {
-    try {
-        $now = [datetimeoffset]::Now
-        $maxAge = [Math]::Max([int]$config.ResponseQueueDedupeSeconds * 4, 3600)
-        foreach ($key in @($responsePathDedupe.Keys)) {
-            if (($now - $responsePathDedupe[$key].LastQueued).TotalSeconds -gt $maxAge) {
-                [void]$responsePathDedupe.Remove($key)
-            }
-        }
-        $rows = @($responsePathDedupe.Keys | ForEach-Object {
-            [pscustomobject]@{
-                Key=$_
-                LastQueued=$responsePathDedupe[$_].LastQueued.ToString("o")
-                Score=[int]$responsePathDedupe[$_].Score
-            }
-        })
-        Write-SentinelAtomicJson $responseDedupeStatePath @($rows)
-    } catch {
-        Write-SentinelError -Root $Root -Component "Watcher" -Operation "Save response path dedupe state" -Exception $_.Exception -Severity "MEDIUM"
-    }
+    param([string]$ChangedKey)
+    if($responseDedupeDisabled){return}
+    try{
+        $row=$responsePathDedupe[$ChangedKey]
+        $saved=Invoke-SentinelNative @{op='journal_put';path=$responseDedupeStatePath;key=$ChangedKey;at=$row.LastQueued.ToString('o');score=[int]$row.Score;now=[datetimeoffset]::Now.ToString('o');max_age=[Math]::Max([int]$config.ResponseQueueDedupeSeconds*4,3600)}
+        foreach($key in @($saved.ExpiredKeys)){$responsePathDedupe.Remove([string]$key)}
+    }catch{Write-SentinelError -Root $Root -Component Watcher -Operation 'Append response dedupe journal' -Exception $_.Exception -Severity HIGH}
 }
+
+
 
 function Write-TextLog {
     param([string]$Message)
@@ -331,7 +315,7 @@ function Queue-SentinelResponse {
                 $Score -ge [int]$config.ResponseQueueHighScore -and
                 [int]$previous.Score -lt [int]$config.ResponseQueueHighScore
             )
-            if ($age -lt [int]$config.ResponseQueueDedupeSeconds -and -not $priorityPromotion) {
+            if ($age -ge 0 -and $age -lt [int]$config.ResponseQueueDedupeSeconds -and -not $priorityPromotion) {
                 [void](Write-SentinelJsonLine -Path $alertLog -Data ([ordered]@{
                     Type="ResponseQueueDeduplicated"
                     FilePath=$FilePath
@@ -388,7 +372,7 @@ function Queue-SentinelResponse {
         }finally{$publishMutex.ReleaseMutex();$publishMutex.Dispose()}
 
         $responsePathDedupe[$pathKey] = [pscustomobject]@{LastQueued=$now;Score=$Score}
-        Save-ResponsePathDedupe
+        Save-ResponsePathDedupe $pathKey
 
         [void](Write-SentinelJsonLine -Path $alertLog -Data ([ordered]@{
             Type="ResponseQueued"

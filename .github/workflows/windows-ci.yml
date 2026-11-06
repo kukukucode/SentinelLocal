@@ -43,6 +43,10 @@ jobs:
         run: |
           & .\tests\Run-Tests.ps1 -ScratchRoot (Join-Path $env:RUNNER_TEMP 'SentinelLocal-tests')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Rust and PowerShell compatibility plus synthetic scan timing
+        run: |
+          & .\tests\Run-NativeEngineTests.ps1 -ScratchRoot (Join-Path $env:RUNNER_TEMP 'SentinelLocal-native-tests')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Pilot reliability and package trust regression
         run: |
           & .\tests\Run-PilotTests.ps1 -ScratchRoot (Join-Path $env:RUNNER_TEMP 'SentinelLocal-pilot-tests')
@@ -102,6 +106,8 @@ jobs:
           name: test-results-${{ matrix.os }}
           path: |
             ${{ runner.temp }}/SentinelLocal-tests/test-results.json
+            ${{ runner.temp }}/SentinelLocal-native-tests/test-results.json
+            ${{ runner.temp }}/SentinelLocal-native-tests/synthetic-timing.json
             ${{ runner.temp }}/SentinelLocal-pilot-tests/test-results.json
             ${{ runner.temp }}/SentinelLocal-security-tests/test-results.json
             ${{ runner.temp }}/SentinelLocal-evaluation-tests/test-results.json

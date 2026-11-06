@@ -14,6 +14,7 @@ try {
 }
 
 Assert-SentinelConfig $config
+Initialize-SentinelNative
 $stateDir = Join-Path $Root "state"
 $queueRoot = Join-Path $stateDir "response-queue"
 $highDir = Join-Path $queueRoot "high"
@@ -49,36 +50,25 @@ if (-not $createdNew) {
     exit 0
 }
 
-$hashDedupe = @{}
-if (Test-Path -LiteralPath $hashDedupePath) {
-    try {
-        foreach ($entry in @(Get-Content $hashDedupePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop)) {
-            if ($entry.SHA256) {
-                $hashDedupe[[string]$entry.SHA256] = [datetimeoffset]::Parse([string]$entry.LastCompleted)
-            }
-        }
-    } catch {
-        Write-SentinelError -Root $Root -Component "ResponseWorker" -Operation "Load hash dedupe state" -Exception $_.Exception -Severity "MEDIUM"
-    }
+$hashDedupe = @{};$hashDedupeDisabled=$false
+try{
+    $saved=Invoke-SentinelNative @{op='journal_open';path=$hashDedupePath;mode='hash';now=[datetimeoffset]::Now.ToString('o');max_age=[Math]::Max([int]$config.ResponseHashDedupeSeconds*4,3600)}
+    foreach($entry in @($saved.Rows)){$hashDedupe[[string]$entry.SHA256]=[datetimeoffset]::Parse([string]$entry.LastCompleted)}
+}catch{
+    $hashDedupe=@{};$hashDedupeDisabled=$true
+    Write-SentinelError -Root $Root -Component ResponseWorker -Operation 'Load dedupe journal; persistent reuse disabled and existing evidence preserved' -Exception $_.Exception -Severity HIGH
 }
 
 function Save-HashDedupe {
-    try {
-        $now = [datetimeoffset]::Now
-        $maxAge = [Math]::Max([int]$config.ResponseHashDedupeSeconds * 4, 3600)
-        foreach ($key in @($hashDedupe.Keys)) {
-            if (($now - $hashDedupe[$key]).TotalSeconds -gt $maxAge) {
-                [void]$hashDedupe.Remove($key)
-            }
-        }
-        $rows = @($hashDedupe.Keys | ForEach-Object {
-            [pscustomobject]@{SHA256=$_;LastCompleted=$hashDedupe[$_].ToString("o")}
-        })
-        Write-SentinelAtomicJson $hashDedupePath @($rows)
-    } catch {
-        Write-SentinelError -Root $Root -Component "ResponseWorker" -Operation "Save hash dedupe state" -Exception $_.Exception -Severity "MEDIUM"
-    }
+    param([string]$ChangedHash)
+    if($hashDedupeDisabled){return}
+    try{
+        $saved=Invoke-SentinelNative @{op='journal_put';path=$hashDedupePath;key=$ChangedHash;at=$hashDedupe[$ChangedHash].ToString('o');now=[datetimeoffset]::Now.ToString('o');max_age=[Math]::Max([int]$config.ResponseHashDedupeSeconds*4,3600)}
+        foreach($key in @($saved.ExpiredKeys)){$hashDedupe.Remove([string]$key)}
+    }catch{Write-SentinelError -Root $Root -Component ResponseWorker -Operation 'Append completed hash journal' -Exception $_.Exception -Severity HIGH}
 }
+
+
 
 function Write-WorkerHeartbeat {
     param([string]$Status,[string]$CurrentRequest = "",[int]$ChildProcessId=0,[string]$RequestStartedAt="")
@@ -206,7 +196,7 @@ try {
                     $hashDedupe.ContainsKey($requestHash)
                 ) {
                     $hashAge = ([datetimeoffset]::Now - $hashDedupe[$requestHash]).TotalSeconds
-                    if ($hashAge -lt [int]$config.ResponseHashDedupeSeconds) {
+                    if ($hashAge -ge 0 -and $hashAge -lt [int]$config.ResponseHashDedupeSeconds) {
                         $skipByHash = $true
                         [void](Write-SentinelJsonLine -Path $alertLog -Data ([ordered]@{
                             Type="ResponseHashDeduplicated"
@@ -227,7 +217,7 @@ try {
                     }
                     if (Test-SentinelCompletedHash -Path ([string]$request.FilePath) -RequestHash $requestHash -Response $responseResult) {
                         $hashDedupe[$requestHash] = [datetimeoffset]::Now
-                        Save-HashDedupe
+                        Save-HashDedupe $requestHash
                     }
                 }
 

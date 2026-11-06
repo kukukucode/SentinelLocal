@@ -64,7 +64,7 @@ function Get-SentinelStorageStatus {
     $evidenceBytes=0L
     $evidencePath=Join-Path $Root 'evidence'
     if(Test-Path -LiteralPath $evidencePath) {
-        foreach($file in @(Get-ChildItem -LiteralPath $evidencePath -File -Recurse -ErrorAction Stop)) { $evidenceBytes += $file.Length }
+        $evidenceBytes=[long](Invoke-SentinelNative @{op='inventory';path=$evidencePath;recurse=$true}).Bytes
     }
     $logOversize=@();$preservedOversize=@();$logBytes=0L;$limits=Get-SentinelLogLimits $Config;$indexes=@{}
     $budget=Enter-SentinelLogLock (Join-Path $Root 'logs\__capacity')
@@ -114,7 +114,7 @@ function Assert-SentinelQueueCapacity {
     param([string]$Root,$Config,[string]$Priority)
     Assert-SentinelStorage $Root $Config
     $count=0
-    foreach($lane in @('high','normal','processing')) { $count += @(Get-ChildItem -LiteralPath (Join-Path $Root ('state\response-queue\'+$lane)) -File -Filter '*.json' -ErrorAction SilentlyContinue).Count }
+    foreach($lane in @('high','normal','processing')) { $count += [long](Invoke-SentinelNative @{op='inventory';path=(Join-Path $Root ('state\response-queue\'+$lane));extension='json'}).Files }
     $limit=[int]$Config.Resources.MaxQueueCount
     if($Priority -ne 'High') { $limit -= [int]$Config.Resources.HighQueueReserve }
     if($count -ge $limit) { throw ('Response queue capacity reached: '+$count+'/'+$limit+'. Event cursors and persistence baseline must not advance.') }
@@ -135,6 +135,12 @@ function Update-SentinelPersistenceSnapshot {
 }
 
 function Get-SentinelEligibleQueueFile {
+    param([string]$QueueRoot,$Config,[int]$HighBurst=0)
+    $next=Invoke-SentinelNative @{op='scheduler';path=[IO.Path]::GetFullPath($QueueRoot);now=[datetimeoffset]::Now.ToString('o');high_burst=$HighBurst;burst_limit=[int]$Config.Scheduling.HighBurstLimit;aging_seconds=[int]$Config.Scheduling.NormalAgingSeconds}
+    if($next.Path){return Get-Item -LiteralPath ([string]$next.Path) -ErrorAction Stop}
+}
+
+function Get-SentinelLegacyEligibleQueueFile {
     param([string]$QueueRoot,$Config,[int]$HighBurst=0)
     $candidates=@{}
     foreach($lane in @('high','normal')) {

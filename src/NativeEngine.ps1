@@ -68,16 +68,36 @@ function Invoke-SentinelNative {
 function Get-SentinelNativeLogScan {
     param([string]$Path)
     $request=@{op='scan';path=[IO.Path]::GetFullPath($Path)}
+    Assert-SentinelLogPath $request.path
     if($script:SentinelBenchmarkCapture){$request.capture=$script:SentinelBenchmarkCapture}
     $scope=if($script:SentinelBenchmarkCapture){Get-SentinelStringHash ($script:SentinelBenchmarkCapture | ConvertTo-Json -Depth 6 -Compress)}else{'VerificationOnly'}
-    if($script:SentinelNativeScanCache -and $script:SentinelNativeScanCache.ContainsKey($request.path)){
-        $cached=$script:SentinelNativeScanCache[$request.path]
-        if($cached.CaptureKey -ceq $scope){
-            $actual=Invoke-SentinelNative @{op='hash';path=$request.path}
-            if($actual.SHA256 -ceq $cached.SHA256 -and $actual.ByteLength -eq $cached.ByteLength){return $cached}
+    $kind=([IO.Path]::GetFileName($Path) -split '\.')[0]
+    if($script:SentinelScanDigestCache -and $script:SentinelScanDigestCache.Count){
+        $actual=Invoke-SentinelNative @{op='hash';path=$request.path}
+        $digestKey=$actual.SHA256+'|'+$kind
+        if($script:SentinelScanDigestCache.ContainsKey($digestKey)){
+            $cached=$script:SentinelScanDigestCache[$digestKey]
+            if($cached.CaptureKey -ceq $scope){return $cached}
+            if($script:SentinelBenchmarkCapture -and $cached.TimeIndexComplete){
+                $from=([datetimeoffset]$script:SentinelBenchmarkCapture.start).UtcTicks-621355968000000000L
+                $to=([datetimeoffset]$script:SentinelBenchmarkCapture.end).UtcTicks-621355968000000000L
+                if($null -eq $cached.MinTimestampTicks -or [long]$cached.MaxTimestampTicks -lt $from -or [long]$cached.MinTimestampTicks -gt $to){$empty=$cached.PSObject.Copy();$empty.Rows=@();$empty.CaptureKey=$scope;return $empty}
+            }
         }
     }
-    $result=Invoke-SentinelNative $request
+    try{$result=Invoke-SentinelNative $request}
+    catch{
+        if($_.Exception.Message -notmatch 'Too many compatibility records|Captured/compatibility data exceeds|Log record exceeds'){throw}
+        # Representation/size limits use the original full verifier, never an
+        # unchecked result. Reparse refusals and actual hash failures stay fatal.
+        $result=Get-SentinelLegacyLogSnapshot $Path
+        $result | Add-Member NoteProperty SHA256 ((Invoke-SentinelNative @{op='hash';path=$request.path}).SHA256)
+        $result | Add-Member NoteProperty CompatibilityRows @()
+        $result | Add-Member NoteProperty Rows @()
+        $result | Add-Member NoteProperty TimeIndexComplete $false
+        $result | Add-Member NoteProperty CanonicalValidationComplete $true
+        $result | Add-Member NoteProperty LegacyFullScan $true
+    }
     # Unsupported numeric/depth representations are checked with the original
     # PS 5.1 canonicalizer, in this bounded batch, never accepted by guessing.
     foreach($entry in @($result.CompatibilityRows)){
@@ -92,6 +112,9 @@ function Get-SentinelNativeLogScan {
     if(-not $script:SentinelNativeScanCache){$script:SentinelNativeScanCache=@{}}
     if($script:SentinelNativeScanCache.Count -ge 256){$script:SentinelNativeScanCache.Clear()}
     $script:SentinelNativeScanCache[[IO.Path]::GetFullPath($Path)]=$result
+    if(-not $script:SentinelScanDigestCache){$script:SentinelScanDigestCache=@{}}
+    if($script:SentinelScanDigestCache.Count -ge 256){$script:SentinelScanDigestCache.Clear()}
+    $script:SentinelScanDigestCache[$result.SHA256+'|'+$kind]=$result
     return $result
 }
 
@@ -106,8 +129,13 @@ function Get-SentinelVerifiedLogDigest {
 function Read-SentinelBenchmarkRows {
     param([string]$Path)
     if(-not $script:SentinelBenchmarkCapture){return Read-SentinelLogRows $Path}
-    foreach($file in @(Get-SentinelLogStreamPaths $Path)){
-        $scan=Get-SentinelNativeLogScan $file
-        foreach($row in @($scan.Rows)){$row}
-    }
+    $scans=@(foreach($file in @(Get-SentinelLogStreamPaths $Path)){Get-SentinelNativeLogScan $file})
+    if(@($scans | Where-Object LegacyFullScan).Count){return Read-SentinelLogRows $Path}
+    foreach($scan in $scans){foreach($row in @($scan.Rows)){$row}}
+}
+
+function Update-SentinelSignatureLru {
+    param([string]$Key)
+    $result=Invoke-SentinelNative @{op='lru_touch';context='signature';key=$Key;limit=256}
+    foreach($evicted in @($result.Evicted)){$script:SentinelSignatureCache.Remove([string]$evicted)}
 }

@@ -179,7 +179,7 @@ function Add-SentinelChainedRecords {
         $willRotate=$MaxFileBytes -gt 0 -and $before.ByteLength -gt 0 -and $before.ByteLength+$bytes.Length+$extraBom -gt $MaxFileBytes
         if($willRotate){$extraBom=3}
         if($MaxFileBytes -gt 0 -and $bytes.Length+3 -gt $MaxFileBytes){throw 'A single log batch exceeds the segment limit.'}
-        if($MaxTotalBytes -gt 0){$total=0L;foreach($file in @(Get-ChildItem -LiteralPath (Split-Path -Parent $Path) -File -Filter '*.jsonl' -ErrorAction Stop)){$total+=$file.Length};if($total+$bytes.Length+$extraBom -gt $MaxTotalBytes){throw 'Total log capacity reached; retained evidence was not deleted.'}}
+        if($MaxTotalBytes -gt 0){$total=[long](Invoke-SentinelNative @{op='inventory';path=(Split-Path -Parent $Path);extension='jsonl'}).Bytes;if($total+$bytes.Length+$extraBom -gt $MaxTotalBytes){throw 'Total log capacity reached; retained evidence was not deleted.'}}
         if($willRotate){Move-SentinelLogSegment $Path $before;$before=Get-SentinelLogCheckpoint $Path}
         $after = [ordered]@{Schema=2;LogPath=$Path;LastHash=$last;FirstPreviousHash=$before.FirstPreviousHash;LineCount=([long]$before.LineCount + $Payloads.Count);ByteLength=([long]$before.ByteLength + $bytes.Length + $extraBom);LastUpdated=(Get-Date).ToString('o')}
         if($before.PSObject.Properties['SegmentSequence']){$after['SegmentSequence']=[long]$before.SegmentSequence}
